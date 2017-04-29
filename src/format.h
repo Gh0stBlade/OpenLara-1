@@ -897,7 +897,7 @@ namespace TR {
             if (!version /*PSX cutscene*/ || version == VER_TR1_PSX) {
                 version = VER_TR1_PSX;
             // tiles
-                stream.read(tiles4, tilesCount = 13);
+                stream.read(tiles4, tilesCount = 15);
                 stream.read(cluts, 512);                
                 stream.seek(0x4000);
             }
@@ -1015,10 +1015,6 @@ namespace TR {
             // palette for release levels
                 if (!demo) 
                     stream.read(palette, 256);
-            // cinematic frames for cameras (PC)
-                stream.read(cameraFrames,   stream.read(cameraFramesCount));
-            // demo data
-                stream.read(demoData,       stream.read(demoDataSize));
             }
 
         // sounds
