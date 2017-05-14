@@ -52,7 +52,7 @@ struct Trigger : Controller {
             }
         }
 
-        if (!inState() && entity.type != TR::Entity::HOLE_KEY && entity.type != TR::Entity::HOLE_PUZZLE)
+        if (!inState() && entity.type != TR::Entity::KEY_HOLE_1 && entity.type != TR::Entity::PUZZLE_HOLE_1)
             animation.setState(state != baseState ? baseState : (entity.type == TR::Entity::TRAP_BLADE ? 2 : (baseState ^ 1)));        
 
         updateAnimation(true);
@@ -80,7 +80,7 @@ struct Dart : Controller {
                 TR::Entity &e = getEntity();
                 
                 vec3 p = pos - dir * 64.0f; // wall offset = 64
-                Sprite::add(game, TR::Entity::SPARK, e.room, (int)p.x, (int)p.y, (int)p.z, Sprite::FRAME_RANDOM);
+                Sprite::add(game, TR::Entity::RICOCHET, e.room, (int)p.x, (int)p.y, (int)p.z, Sprite::FRAME_RANDOM);
 
                 level->entityRemove(entity);
                 delete this;
@@ -215,6 +215,7 @@ struct MovingBlock : Trigger {
 
 struct Door : Trigger {
     int8 *floor[2], orig[2];
+    uint16 box;
 
     Door(IGame *game, int entity) : Trigger(game, entity, true) {
         TR::Entity &e = getEntity();
@@ -222,6 +223,8 @@ struct Door : Trigger {
         vec3 p = pos - getDir() * 1024.0f;
 
         level->getFloorInfo(e.room, (int)p.x, (int)p.y, (int)p.z, info);
+        box = info.boxIndex;
+
         int dx, dz;
         TR::Room::Sector *s = &level->getSector(e.room, (int)p.x, (int)p.z, dx, dz);
 
@@ -243,6 +246,12 @@ struct Door : Trigger {
             v[1] = orig[1];
         } else
             v[0] = v[1] = TR::FLOOR_BLOCK;
+
+        if (box != 0xFFFF) {
+            TR::Box &b = level->boxes[box];
+            if (b.overlap.blockable)
+                b.overlap.block = !getEntity().flags.active;
+        }
 
         if (floor[0]) *floor[0] = v[0];
         if (floor[1]) *floor[1] = v[1];

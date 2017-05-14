@@ -201,7 +201,7 @@ struct MeshBuilder {
             
             for (int j = 0; j < r.meshesCount; j++) {
                 TR::Room::Mesh &m = r.meshes[j];
-                TR::StaticMesh *s = level.getMeshByID(m.meshID);
+                TR::StaticMesh *s = &level.staticMeshes[m.meshIndex];
                 if (!level.meshOffsets[s->mesh]) continue;
                 TR::Mesh &mesh = level.meshes[level.meshOffsets[s->mesh]];
 
@@ -310,7 +310,7 @@ struct MeshBuilder {
             // static meshes
                 for (int j = 0; j < room.meshesCount; j++) {
                     TR::Room::Mesh &m = room.meshes[j];
-                    TR::StaticMesh *s = level.getMeshByID(m.meshID);
+                    TR::StaticMesh *s = &level.staticMeshes[m.meshIndex];
                     if (!level.meshOffsets[s->mesh]) continue;
                     TR::Mesh &mesh = level.meshes[level.meshOffsets[s->mesh]];
 
@@ -356,6 +356,7 @@ struct MeshBuilder {
                 bool opaque = buildMesh(true, mesh, level, indices, vertices, iCount, vCount, vStart, j, 0, 0, 0, 0);
                 if (!opaque)
                     buildMesh(false, mesh, level, indices, vertices, iCount, vCount, vStart, j, 0, 0, 0, 0);
+                TR::Entity::fixOpaque(model.type, opaque);
                 range.opaque &= opaque;
             }
             range.geometry.iCount = iCount - range.geometry.iStart;

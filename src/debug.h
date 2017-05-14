@@ -288,11 +288,11 @@ namespace Debug {
                     for (int x = 0; x < r.xSectors; x++) {
                         TR::Room::Sector &s = r.sectors[x * r.zSectors + z];
                         if (s.boxIndex != 0xFFFF) {
-                            bool blockable = level.boxes[s.boxIndex].overlap.value & 0x8000;
-                            bool block     = level.boxes[s.boxIndex].overlap.value & 0x4000;
+                            bool blockable = level.boxes[s.boxIndex].overlap.blockable;
+                            bool block     = level.boxes[s.boxIndex].overlap.block;
                             int  floor     = level.boxes[s.boxIndex].floor;
 
-                            if (blockable || block) {                                
+                            if (blockable || block) {
                                 sprintf(buf, "blocked: %s", block ? "true" : "false");
                                 Debug::Draw::text(vec3(r.info.x + x * 1024 + 512, floor, r.info.z + z * 1024 + 512), vec4(1, 1, 0, 1), buf);
                             }
@@ -304,10 +304,22 @@ namespace Debug {
         }
 
         void debugOverlaps(const TR::Level &level, int boxIndex) {
-            glColor4f(1.0f, 1.0f, 0.0f, 0.25f);
+            char str[64];
+
+            TR::Box &b = level.boxes[boxIndex];
+            sprintf(str, "%d", boxIndex);
+            Draw::text(vec3((b.maxX + b.minX) * 0.5, b.floor, (b.maxZ + b.minZ) * 0.5), vec4(0, 1, 0, 1), str);
+            glColor4f(0.0f, 1.0f, 0.0f, 0.25f);
+            Core::setBlending(bmAlpha);
+            debugBox(b);
+
             TR::Overlap *o = &level.overlaps[level.boxes[boxIndex].overlap.index];
             do {
                 TR::Box &b = level.boxes[o->boxIndex];
+                sprintf(str, "%d", o->boxIndex);
+                Draw::text(vec3((b.maxX + b.minX) * 0.5, b.floor, (b.maxZ + b.minZ) * 0.5), vec4(0, 0, 1, 1), str);
+                glColor4f(0.0f, 0.0f, 1.0f, 0.25f);
+                Core::setBlending(bmAlpha);
                 debugBox(b);
             } while (!(o++)->end);
         }
@@ -369,7 +381,7 @@ namespace Debug {
             for (int i = 0; i < level.entitiesCount; i++) {
                 TR::Entity &e = level.entities[i];
           
-                sprintf(buf, "%d", (int)e.type);
+                sprintf(buf, "%d (%d)", (int)e.type, i);
                 Debug::Draw::text(vec3(e.x, e.y, e.z), e.flags.active ? vec4(0, 0, 0.8, 1) : vec4(0.8, 0, 0, 1), buf);
             }
 
@@ -379,6 +391,24 @@ namespace Debug {
                 sprintf(buf, "%d (%d)", i, c.room);
                 Debug::Draw::text(vec3(c.x, c.y, c.z), vec4(0, 0.8, 0, 1), buf);
             }
+        }
+
+        void path(TR::Level &level, Enemy *enemy) {
+            Enemy::Path *path = enemy->path;
+
+            if (!path || !enemy->target) return;
+            for (int i = 0; i < path->count; i++) {
+                TR::Box &b = level.boxes[path->boxes[i]];
+                if (i == path->index)
+                    glColor4f(0.5, 0.5, 0.0, 0.5);
+                else
+                    glColor4f(0.0, 0.5, 0.0, 0.5);
+                debugBox(b);
+            }
+
+            Core::setDepthTest(false);
+            Draw::point(enemy->waypoint, vec4(1.0));
+            Core::setDepthTest(true);
         }
 
         void zones(const TR::Level &level, Lara *lara) {
@@ -428,10 +458,8 @@ namespace Debug {
                 TR::Room &r = level.rooms[i];
  
                 for (int j = 0; j < r.meshesCount; j++) {
-                    TR::Room::Mesh &m = r.meshes[j];
-                                        
-                    TR::StaticMesh *sm = level.getMeshByID(m.meshID);
-                    ASSERT(sm != NULL);
+                    TR::Room::Mesh &m  = r.meshes[j];
+                    TR::StaticMesh *sm = &level.staticMeshes[m.meshIndex];
 
                     Box box;
                     vec3 offset = vec3(m.x, m.y, m.z);
@@ -446,12 +474,13 @@ namespace Debug {
                     
                     if (!level.meshOffsets[sm->mesh]) continue;
                     const TR::Mesh &mesh = level.meshes[level.meshOffsets[sm->mesh]];
-
+                    /*
                     {
                         char buf[255];
                         sprintf(buf, "flags %d", (int)mesh.flags.value);
                         Debug::Draw::text(offset + (box.min + box.max) * 0.5f, vec4(0.5, 0.5, 1.0, 1), buf);
                     }
+                    */
                     
                 }
             }
@@ -462,76 +491,29 @@ namespace Debug {
                 if (!controller) continue;
 
                 mat4 matrix = controller->getMatrix();
-                Box box = controller->animation.getBoundingBox(vec3(0.0f), 0);
+                Basis basis(matrix);
+
+                TR::Model *m = controller->getModel();
+                if (!m) continue;
+
+                Box box = controller->getBoundingBoxLocal();
                 Debug::Draw::box(matrix, box.min, box.max, vec4(1.0));
 
+                Sphere spheres[34];
+                ASSERT(m->mCount <= 34);
+                controller->getSpheres(spheres);
 
-                for (int j = 0; j < level.modelsCount; j++) {
-                    TR::Model &m = level.models[j];
-                    TR::Node *node = m.node < level.nodesDataSize ? (TR::Node*)&level.nodesData[m.node] : NULL;
-
-                    if (!node) continue; // ???
-                    if (e.type == m.type) {
-                        ASSERT(m.animation < 0xFFFF);
-
-                        int fSize = sizeof(TR::AnimFrame) + m.mCount * sizeof(uint16) * 2;
-
-                        TR::Animation *anim  = controller->animation;
-                        TR::AnimFrame *frame = (TR::AnimFrame*)&level.frameData[(anim->frameOffset + (controller ? int((controller->animation.time * 30.0f / anim->frameRate)) * fSize : 0) >> 1)];
-
-                        //mat4 m;
-                        //m.identity();
-                        //m.translate(vec3(frame->x, frame->y, frame->z).lerp(vec3(frameB->x, frameB->y, frameB->z), k));
-
-                        int  sIndex = 0;
-                        mat4 stack[20];
-                        mat4 joint;
-
-                        joint.identity();
-                        if (frame) joint.translate(frame->pos);
-
-                        for (int k = 0; k < m.mCount; k++) {
-
-                            if (k > 0 && node) {
-                                TR::Node &t = node[k - 1];
-
-                                if (t.flags & 0x01) joint = stack[--sIndex];
-                                if (t.flags & 0x02) stack[sIndex++] = joint;
-
-                                ASSERT(sIndex >= 0 && sIndex < 20);
-
-                                joint.translate(vec3(t.x, t.y, t.z));
-                            }
-
-                            vec3 a = frame ? frame->getAngle(k) : vec3(0.0f);
-
-                            mat4 rot;
-                            rot.identity();
-                            rot.rotateY(a.y);
-                            rot.rotateX(a.x);
-                            rot.rotateZ(a.z);
-
-                            joint = joint * rot;
-
-                            int offset = level.meshOffsets[m.mStart + k];
-                            TR::Mesh *mesh = (TR::Mesh*)&level.meshes[offset];
-                            //if (!mesh->flags) continue;
-                            Debug::Draw::sphere(matrix * joint * mesh->center, mesh->radius, vec4(0, 1, 1, 0.5f));
-                            
-                            { //if (e.id != 0) {
-                                char buf[255];
-                                sprintf(buf, "(%d) radius %d flags %d", (int)e.type, (int)mesh->radius, (int)mesh->flags.value);
-                                Debug::Draw::text(matrix * joint * mesh->center, vec4(0.5, 1, 0.5, 1), buf);
-                            }
-                            
-                        }
-                        Debug::Draw::box(matrix, frame->box.min(), frame->box.max(), vec4(1.0));
-
-                        break;
+                for (int joint = 0; joint < m->mCount; joint++) {
+                    Sphere &sphere = spheres[joint];
+                    Debug::Draw::sphere(sphere.center, sphere.radius, vec4(0, 1, 1, 0.5f));
+                    /*
+                    { //if (e.id != 0) {
+                        char buf[255];
+                        sprintf(buf, "(%d) radius %d flags %d", (int)e.type, (int)mesh->radius, (int)mesh->flags.value);
+                        Debug::Draw::text(sphere.center, vec4(0.5, 1, 0.5, 1), buf);
                     }
-                
+                    */
                 }
-
             }
         }
 
@@ -621,69 +603,14 @@ namespace Debug {
             return "UNKNOWN";
         }
 
+        const char *TR1_TYPE_NAMES[] = { TR1_TYPES(DECL_STR) };
+
         const char *getEntityName(const TR::Level &level, const TR::Entity &entity) {
-            switch (entity.type) {
-                case_name(TR::Entity, LARA                 ); 
-                case_name(TR::Entity, ENEMY_TWIN           ); 
-                case_name(TR::Entity, ENEMY_WOLF           ); 
-                case_name(TR::Entity, ENEMY_BEAR           ); 
-                case_name(TR::Entity, ENEMY_BAT            ); 
-                case_name(TR::Entity, ENEMY_CROCODILE_LAND ); 
-                case_name(TR::Entity, ENEMY_CROCODILE_WATER); 
-                case_name(TR::Entity, ENEMY_LION_MALE      ); 
-                case_name(TR::Entity, ENEMY_LION_FEMALE    ); 
-                case_name(TR::Entity, ENEMY_PUMA           ); 
-                case_name(TR::Entity, ENEMY_GORILLA        ); 
-                case_name(TR::Entity, ENEMY_RAT_LAND       ); 
-                case_name(TR::Entity, ENEMY_RAT_WATER      ); 
-                case_name(TR::Entity, ENEMY_REX            ); 
-                case_name(TR::Entity, ENEMY_RAPTOR         ); 
-                case_name(TR::Entity, ENEMY_MUTANT_1       ); 
-                case_name(TR::Entity, ENEMY_CENTAUR        ); 
-                case_name(TR::Entity, ENEMY_MUMMY          ); 
-                case_name(TR::Entity, ENEMY_LARSON         ); 
-                case_name(TR::Entity, TRAP_FLOOR           ); 
-                case_name(TR::Entity, TRAP_BLADE           ); 
-                case_name(TR::Entity, TRAP_SPIKES          ); 
-                case_name(TR::Entity, TRAP_BOULDER         ); 
-                case_name(TR::Entity, TRAP_DART            ); 
-                case_name(TR::Entity, TRAP_DARTGUN         ); 
-                case_name(TR::Entity, BLOCK_1              ); 
-                case_name(TR::Entity, BLOCK_2              ); 
-                case_name(TR::Entity, SWITCH               ); 
-                case_name(TR::Entity, SWITCH_WATER         ); 
-                case_name(TR::Entity, DOOR_1               ); 
-                case_name(TR::Entity, DOOR_2               ); 
-                case_name(TR::Entity, DOOR_3               ); 
-                case_name(TR::Entity, DOOR_4               ); 
-                case_name(TR::Entity, DOOR_BIG_1           ); 
-                case_name(TR::Entity, DOOR_BIG_2           ); 
-                case_name(TR::Entity, DOOR_5               ); 
-                case_name(TR::Entity, DOOR_6               ); 
-                case_name(TR::Entity, TRAP_DOOR_1          ); 
-                case_name(TR::Entity, TRAP_DOOR_2          );
-                case_name(TR::Entity, BRIDGE_0             );
-                case_name(TR::Entity, BRIDGE_1             );
-                case_name(TR::Entity, BRIDGE_2             );
-                case_name(TR::Entity, GEARS_1              );
-                case_name(TR::Entity, GEARS_2              );
-                case_name(TR::Entity, GEARS_3              );
-                case_name(TR::Entity, PUZZLE_1             ); 
-                case_name(TR::Entity, PUZZLE_2             ); 
-                case_name(TR::Entity, PUZZLE_3             ); 
-                case_name(TR::Entity, PUZZLE_4             ); 
-                case_name(TR::Entity, HOLE_PUZZLE          ); 
-                case_name(TR::Entity, HOLE_PUZZLE_SET      ); 
-                case_name(TR::Entity, PICKUP               ); 
-                case_name(TR::Entity, KEY_1                ); 
-                case_name(TR::Entity, KEY_2                ); 
-                case_name(TR::Entity, KEY_3                ); 
-                case_name(TR::Entity, KEY_4                ); 
-                case_name(TR::Entity, HOLE_KEY             ); 
-                case_name(TR::Entity, VIEW_TARGET          );
-                case_name(TR::Entity, WATERFALL            ); 
-            }
-            return "UNKNOWN";
+            if (entity.type == TR::Entity::NONE)
+                return "NONE";
+            if (entity.type < 0 || entity.type >= COUNT(TR1_TYPE_NAMES))
+                return "UNKNOWN";
+            return TR1_TYPE_NAMES[entity.type];
         }
 
         void info(const TR::Level &level, const TR::Entity &entity, Animation &anim) {

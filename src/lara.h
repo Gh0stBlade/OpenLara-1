@@ -36,7 +36,7 @@
 #define LARA_WET_TIMER      (LARA_WET_SPECULAR / 16.0f)   // 4 sec
 
 #define PICKUP_FRAME_GROUND     40
-#define PICKUP_FRAME_UNDERWATER 16
+#define PICKUP_FRAME_UNDERWATER 18
 #define PUZZLE_FRAME            80
 
 #define MAX_TRIGGER_ACTIONS 64
@@ -52,6 +52,8 @@ struct Lara : Character {
     enum {
         ANIM_STAND_LEFT         = 2,
         ANIM_STAND_RIGHT        = 3,
+
+        ANIM_RUN_START          = 6,
 
         ANIM_STAND              = 11,
 
@@ -215,6 +217,10 @@ struct Lara : Character {
     int viewTarget;
     int roomPrev; // water out from room
     vec2 rotFactor;
+
+    float       hitTime;
+    int         hitDir;
+    vec3        collisionOffset;
 
     struct Braid {
         Lara *lara;
@@ -386,6 +392,9 @@ struct Lara : Character {
                 animation.setAnim(ANIM_STAND);
         }
 
+        hitDir  = -1;
+        hitTime = 0.0f;
+
         getEntity().flags.active = 1;
         initMeshOverrides();
 
@@ -459,8 +468,10 @@ struct Lara : Character {
         if (room == TR::NO_ROOM)
             return;
 
-        if (level->rooms[room].flags.water)
+        if (level->rooms[room].flags.water) {
             stand = STAND_UNDERWATER;
+            animation.setAnim(ANIM_UNDERWATER);
+        }
 
         velocity = vec3(0.0f);
 
@@ -614,6 +625,19 @@ struct Lara : Character {
                && state != STATE_WATER_OUT;
     }
 
+    bool canHitAnim() {
+        return    state == STATE_WALK
+               || state == STATE_RUN
+               || state == STATE_STOP
+               || state == STATE_FAST_BACK
+               || state == STATE_TURN_RIGHT
+               || state == STATE_TURN_LEFT
+               || state == STATE_BACK
+               || state == STATE_FAST_TURN
+               || state == STATE_STEP_RIGHT
+               || state == STATE_STEP_LEFT;
+    }
+
     bool wpnReady() {
         return arms[0].anim != Weapon::Anim::PREPARE && arms[0].anim != Weapon::Anim::UNHOLSTER && arms[0].anim != Weapon::Anim::HOLSTER;
     }
@@ -745,7 +769,7 @@ struct Lara : Character {
                 Sprite::add(game, TR::Entity::BLOOD, room, (int)hit.x, (int)hit.y, (int)hit.z, Sprite::FRAME_ANIMATED);
             } else {
                 hit -= d * 64.0f;
-                Sprite::add(game, TR::Entity::SPARK, room, (int)hit.x, (int)hit.y, (int)hit.z, Sprite::FRAME_RANDOM);
+                Sprite::add(game, TR::Entity::RICOCHET, room, (int)hit.x, (int)hit.y, (int)hit.z, Sprite::FRAME_RANDOM);
 
                 float dist = (hit - p).length();
                 if (dist < nearDist) {
@@ -888,8 +912,9 @@ struct Lara : Character {
     }
 
     void updateOverrides() {
+        int overrideMask = 0;
         // head & chest
-        animation.overrideMask |= BODY_CHEST | BODY_HEAD;
+        overrideMask |= BODY_CHEST | BODY_HEAD;
 
         animation.overrides[ 7] = animation.getJointRot( 7);
         animation.overrides[14] = animation.getJointRot(14);
@@ -902,6 +927,7 @@ struct Lara : Character {
         }
     */
 
+    // arms
         if (!emptyHands()) {
             // right arm
             Arm *arm = &arms[0];
@@ -914,10 +940,38 @@ struct Lara : Character {
             animation.overrides[12] = arm->animation.getJointRot(12);
             animation.overrides[13] = arm->animation.getJointRot(13);
 
-            animation.overrideMask |=  (BODY_ARM_R | BODY_ARM_L);
+            overrideMask |=  (BODY_ARM_R | BODY_ARM_L);
         } else
-            animation.overrideMask &= ~(BODY_ARM_R | BODY_ARM_L);
+            overrideMask &= ~(BODY_ARM_R | BODY_ARM_L);
 
+    // update hit anim
+        if (hitDir >= 0) {
+            Animation hitAnim = Animation(level, getModel());
+            switch (hitDir) {
+                case 0 : hitAnim.setAnim(ANIM_HIT_FRONT, 0, false); break;
+                case 1 : hitAnim.setAnim(ANIM_HIT_LEFT,  0, false); break;
+                case 2 : hitAnim.setAnim(ANIM_HIT_BACK , 0, false); break;
+                case 3 : hitAnim.setAnim(ANIM_HIT_RIGHT, 0, false); break;
+            }
+            hitTime = min(hitTime, hitAnim.timeMax - EPS);
+            hitAnim.time = hitTime;
+            hitAnim.updateInfo();
+            
+            overrideMask &= ~(BODY_CHEST | BODY_HEAD);
+            int hitMask = (BODY_UPPER | BODY_LOWER | BODY_HEAD) & ~overrideMask;
+            int index    = 0;
+            while (hitMask) {
+                if (hitMask & 1)
+                    animation.overrides[index] = hitAnim.getJointRot(index);
+                index++;
+                hitMask >>= 1;
+            }
+
+            hitTime += Core::deltaTime;
+            overrideMask = BODY_UPPER | BODY_LOWER | BODY_HEAD;
+        }
+
+        animation.overrideMask = overrideMask;
 
         lookAt(viewTarget);
 
@@ -1000,21 +1054,24 @@ struct Lara : Character {
 
     int getTarget() {
         vec3 dir = getDir().normal();
-        float dist = TARGET_MAX_DIST;// * TARGET_MAX_DIST;
+        float dist = TARGET_MAX_DIST;
 
         int index = -1;
         for (int i = 0; i < level->entitiesCount; i++) {
             TR::Entity &e = level->entities[i];
             if (!e.flags.active || !e.isEnemy()) continue;
-            Character *controller = (Character*)e.controller;
-            if (controller->health <= 0) continue;
+            Character *enemy = (Character*)e.controller;
+            if (enemy->health <= 0) continue;
 
-            vec3 p = controller->pos;
+            Box box = enemy->getBoundingBox();
+            vec3 p = box.center();
+            p.y = box.min.y + (box.max.y - box.min.y) / 3.0f;
+            
             vec3 v = p - pos;
             if (dir.dot(v.normal()) <= 0.5f) continue; // target is out of sight -60..+60 degrees
 
             float d = v.length();
-            if (d < dist && checkOcclusion(pos - vec3(0, 512, 0), p, d) ) {
+            if (d < dist && checkOcclusion(pos - vec3(0, 650, 0), p, d) ) {
                 index = i;
                 dist  = d;
             }
@@ -1054,7 +1111,7 @@ struct Lara : Character {
     virtual void cmdJump(const vec3 &vel) {
         vec3 v = vel;
         if (state == STATE_HANG_UP)
-            v.y = (3.0f - sqrtf(-2.0f * GRAVITY / 30.0f * (collision.info[Collision::FRONT].floor - pos.y + 800.0f)));
+            v.y = (3.0f - sqrtf(-2.0f * GRAVITY / 30.0f * (collision.info[Collision::FRONT].floor - pos.y + 800.0f - 128.0f)));
         Character::cmdJump(v);
     }
 
@@ -1078,8 +1135,6 @@ struct Lara : Character {
 
     virtual void hit(int damage, Controller *enemy = NULL) {
         health -= damage;
-        if (enemy && health > 0)
-            playSound(TR::SND_HIT, pos, Sound::PAN | Sound::REPLAY);
     };
 
     bool waterOut() {
@@ -1114,40 +1169,44 @@ struct Lara : Character {
     }
 
     bool doPickUp() {
+        if ((state != STATE_STOP && state != STATE_TREAD) || !animation.canSetState(STATE_PICK_UP))
+            return false;
+
         int room = getRoomIndex();
-        TR::Entity &e = getEntity();
+        TR::Limits::Limit limit = state == STATE_STOP ? TR::Limits::PICKUP : TR::Limits::PICKUP_UNDERWATER;
 
         for (int i = 0; i < level->entitiesCount; i++) {
             TR::Entity &item = level->entities[i];
             if (item.room == room && !item.flags.invisible) {
-                if (abs(item.x - e.x) > 256 || abs(item.z - e.z) > 256)
+                if (!item.isItem())
+                    continue;
+                
+                Controller *controller = (Controller*)item.controller;
+                
+                if (stand == STAND_UNDERWATER)
+                    controller->angle.x = -25 * DEG2RAD;
+                controller->angle.y = angle.y;
+
+                if (!checkInteraction(controller, limit, (input & ACTION) != 0))
                     continue;
 
-                if (item.isItem()) {
-                    lastPickUp = i;
-                    angle.x = 0.0f;
-                    pos = ((Controller*)item.controller)->pos;
-                    if (stand == STAND_UNDERWATER) { // TODO: lerp to pos/angle
-                        pos -= getDir() * 256.0f;
-                        pos.y -= 256;
-                    }
-                    updateEntity();
-                    return true;
-                }
+                alignByItem(controller, limit, true, false);
+
+                if (stand == STAND_UNDERWATER)
+                    angle.x = -25 * DEG2RAD;
+
+                lastPickUp = i;
+                return true;
             }
         }
         return false;
     }
 
-    bool checkAngle(TR::angle rotation) {
-        return fabsf(shortAngle(rotation, getEntity().rotation)) < PI * 0.25f;
-    }
-
     bool useItem(TR::Entity::Type item, TR::Entity::Type slot) {
         if (item == TR::Entity::NONE) {
             switch (slot) {
-                case TR::Entity::HOLE_KEY    : item = TR::Entity::KEY_1;    break;      // TODO: 1-4
-                case TR::Entity::HOLE_PUZZLE : item = TR::Entity::PUZZLE_1; break;
+                case TR::Entity::KEY_HOLE_1    : item = TR::Entity::KEY_1;    break;      // TODO: 1-4
+                case TR::Entity::PUZZLE_HOLE_1 : item = TR::Entity::PUZZLE_1; break;
                 default : return false;
             }
         }
@@ -1157,6 +1216,33 @@ struct Lara : Character {
             return true;
         }
         return false;
+    }
+
+    void alignByItem(Controller *item, const TR::Limits::Limit &limit, bool dx, bool ay) {
+        if (ay)
+            angle = item->angle;
+        else
+            angle.x = angle.z = 0.0f;
+
+        mat4 m = item->getMatrix();
+
+        float fx = 0.0f;
+        if (!dx)
+            fx = (m.transpose() * vec4(pos - item->pos, 0.0f)).x;
+
+        pos      = item->pos + (m * vec4(fx, limit.dy, limit.dz, 0.0f)).xyz;
+        velocity = vec3(0.0f);
+        speed    = 0.0f;
+        updateEntity();
+    }
+
+    bool checkInteraction(Controller *controller, const TR::Limits::Limit &limit, bool action) {
+        if ((state != STATE_STOP && state != STATE_TREAD && state != STATE_PUSH_PULL_READY) || !action || !emptyHands())
+            return false;
+
+        vec3 delta = (controller->getMatrix().transpose() * vec4(pos - controller->pos, 0.0f)).xyz; // inverse transform
+        
+        return limit.box.contains(delta) && fabsf(shortAngle(angle.y, controller->angle.y)) <= limit.ay * DEG2RAD;
     }
 
     void checkTrigger() {
@@ -1178,6 +1264,8 @@ struct Lara : Character {
 
         if (info.trigInfo.once == 1 && isActive) return; // once trigger is already activated
 
+        TR::Limits::Limit *limit = NULL;
+
         int actionState = state;
         switch (info.trigger) {
             case TR::Level::Trigger::ACTIVATE :
@@ -1188,26 +1276,28 @@ struct Lara : Character {
                 break;
             case TR::Level::Trigger::SWITCH :
                 actionState = (isActive && stand == STAND_GROUND) ? STATE_SWITCH_UP : STATE_SWITCH_DOWN;
-                if (!isPressed(ACTION) || state == actionState || !emptyHands())
+                if (!animation.canSetState(actionState))
                     return;
-                if (!checkAngle(level->entities[info.trigCmd[0].args].rotation))
-                    return;
+                limit = state == STATE_STOP ? &TR::Limits::SWITCH : &TR::Limits::SWITCH_UNDERWATER;
+                {
+                    Trigger *controller = (Trigger*)level->entities[info.trigCmd[0].args].controller;
+                    if (!controller->inState() || !checkInteraction(controller, *limit, isPressed(ACTION)))
+                        return;
+                }
                 break;
             case TR::Level::Trigger::KEY :
                 if (level->entities[info.trigCmd[0].args].flags.active)
                     return;
-                actionState = level->entities[info.trigCmd[0].args].type == TR::Entity::HOLE_KEY ? STATE_USE_KEY : STATE_USE_PUZZLE;
-                if (isActive || !isPressed(ACTION) || state == actionState || !emptyHands())   // TODO: STATE_USE_PUZZLE
+                actionState = level->entities[info.trigCmd[0].args].type == TR::Entity::KEY_HOLE_1 ? STATE_USE_KEY : STATE_USE_PUZZLE;
+                if (!animation.canSetState(actionState))
                     return;
-                if (!checkAngle(level->entities[info.trigCmd[0].args].rotation))
+                limit = actionState == STATE_USE_KEY ? &TR::Limits::KEY_HOLE : &TR::Limits::PUZZLE_HOLE;
+                if (!checkInteraction((Controller*)level->entities[info.trigCmd[0].args].controller, *limit, isPressed(ACTION)))
+                    return;                
+                if (!useItem(TR::Entity::NONE, level->entities[info.trigCmd[0].args].type)) {
+                    playSound(TR::SND_NO, pos, Sound::PAN);
                     return;
-                if (animation.canSetState(actionState)) {
-                    if (!useItem(TR::Entity::NONE, level->entities[info.trigCmd[0].args].type)) {
-                        playSound(TR::SND_NO, pos, Sound::PAN);
-                        return;
-                    }
-                } else
-                    return;
+                }
                 lastPickUp = info.trigCmd[0].args; // TODO: it's not pickup, it's key/puzzle hole
                 break;
             case TR::Level::Trigger::PICKUP :
@@ -1222,17 +1312,11 @@ struct Lara : Character {
         // try to activate Lara state
         if (!animation.setState(actionState)) return;
 
-        if (info.trigger == TR::Level::Trigger::SWITCH || info.trigger == TR::Level::Trigger::KEY) {
-            if (info.trigger == TR::Level::Trigger::KEY)
-                level->entities[info.trigCmd[0].args].flags.active = true;
+        if (info.trigger == TR::Level::Trigger::KEY)
+            level->entities[info.trigCmd[0].args].flags.active = true;
 
-            TR::Entity &p = level->entities[info.trigCmd[0].args];
-            angle.y = p.rotation;
-            angle.x = 0;
-            pos = ((Controller*)p.controller)->pos + vec3(sinf(angle.y), 0, cosf(angle.y)) * (stand == STAND_GROUND ? 384.0f : 128.0f);
-            velocity = vec3(0.0f);
-            updateEntity();
-        }
+        if (limit)
+            alignByItem((Controller*)level->entities[info.trigCmd[0].args].controller, *limit, stand != STAND_GROUND || info.trigger != TR::Level::Trigger::SWITCH, true);
 
         // build trigger activation chain
         ActionCommand *actionItem = &actionList[1];
@@ -1355,10 +1439,11 @@ struct Lara : Character {
             if (c.side != Collision::FRONT)
                 return state;
 
-            int floor = c.info[Collision::FRONT].floor;
+            int floor   = c.info[Collision::FRONT].floor;
+            int ceiling = c.info[Collision::FRONT].ceiling;
             int hands = int(bounds.min.y);
 
-            if (abs(floor - hands) < 128) {
+            if (abs(floor - hands) < 64 && floor != ceiling) {
                 alignToWall(-LARA_RADIUS);
                 pos.y = float(floor + LARA_HANG_OFFSET);
                 stand = STAND_HANG;
@@ -1406,37 +1491,44 @@ struct Lara : Character {
     }
 
     Block* getBlock() {
-        int y = int(pos.y);
-
         for (int i = 0; i < level->entitiesCount; i++) {
             TR::Entity &e = level->entities[i];
+            if (!e.isBlock())
+                continue;
 
-            int q = entityQuadrant(e);
-            int dx = abs(int(pos.x) - e.x);
-            int dz = abs(int(pos.z) - e.z);
+            Block *block = (Block*)e.controller;
+            float oldAngle = block->angle.y;
+            block->angle.y = angleQuadrant(angle.y) * (PI * 0.5f);
 
-            if (q > -1 && e.isBlock() && dx < 1024 && dz < 1024 && e.y == y && alignToWall(-LARA_RADIUS, q, 64 + int(LARA_RADIUS), 512 - int(LARA_RADIUS))) {
-                Block *block = (Block*)e.controller;
-                block->angle.y = angle.y;
-                block->updateEntity();
-                return block;
+            if (!checkInteraction(block, TR::Limits::BLOCK, (input & ACTION) != 0)) {
+                block->angle.y = oldAngle;
+                continue;
             }
+
+            alignByItem(block, TR::Limits::BLOCK, false, true);
+
+            return block;
         }
         return NULL;
     }
 
     virtual int getStateGround() {
+        int res = STATE_STOP;
         angle.x = 0.0f;
 
-        if ((input & ACTION) && emptyHands() && doPickUp())
+        if ((state == STATE_STOP || state == STATE_TREAD) && (input & ACTION) && emptyHands() && doPickUp())
             return STATE_PICK_UP;
 
         if ((input & (FORTH | ACTION)) == (FORTH | ACTION) && (animation.index == ANIM_STAND || animation.index == ANIM_STAND_NORMAL) && emptyHands() && collision.side == Collision::FRONT) { // TODO: get rid of animation.index
-            int floor = collision.info[Collision::FRONT].floor;
+            int floor   = collision.info[Collision::FRONT].floor;
+            int ceiling = collision.info[Collision::FRONT].ceiling; 
+
             int h = (int)pos.y - floor;
 
             int aIndex = animation.index;
-            if (h <= 2 * 256 + 128) {
+            if (floor == ceiling || h < 256)
+                ;// do nothing
+            else if (h <= 2 * 256 + 128) {
                 aIndex = ANIM_CLIMB_2;
                 pos.y  = floor + 512.0f;
             } else if (h <= 3 * 256 + 128) {
@@ -1451,20 +1543,30 @@ struct Lara : Character {
             }
         }
 
-        if ( (input & (FORTH | BACK)) == (FORTH | BACK) && (state == STATE_STOP || state == STATE_RUN) )
+        if ( (input & (FORTH | BACK)) == (FORTH | BACK) && (animation.index == ANIM_STAND_NORMAL || state == STATE_RUN) )
             return animation.setAnim(ANIM_STAND_ROLL_BEGIN);
 
         // ready to jump
         if (state == STATE_COMPRESS) {
+            float   ext = angle.y;
             switch (input & (RIGHT | LEFT | FORTH | BACK)) {
-                case RIGHT         : return STATE_RIGHT_JUMP;
-                case LEFT          : return STATE_LEFT_JUMP;
+                case RIGHT         : res = STATE_RIGHT_JUMP;    ext +=  PI * 0.5f; break;
+                case LEFT          : res = STATE_LEFT_JUMP;     ext -=  PI * 0.5f; break;
                 case FORTH | LEFT  :
                 case FORTH | RIGHT :
-                case FORTH         : return STATE_FORWARD_JUMP;
-                case BACK          : return STATE_BACK_JUMP;
-                default            : return STATE_UP_JUMP;
+                case FORTH         : res = STATE_FORWARD_JUMP;  break;
+                case BACK          : res = STATE_BACK_JUMP;     ext +=  PI;        break;
+                default            : res = STATE_UP_JUMP;       break;
             }
+
+            if (res != STATE_UP_JUMP) {
+                vec3 p = pos;
+                collision  = Collision(level, getRoomIndex(), p, vec3(0.0f), vec3(0.0f), LARA_RADIUS * 2.5f, ext, 0, LARA_HEIGHT, 256 + 128, 0xFFFFFF);
+                if (collision.side == Collision::FRONT)
+                    res = STATE_UP_JUMP;
+            }
+
+            return res;
         }
 
         // jump button is pressed
@@ -1479,22 +1581,44 @@ struct Lara : Character {
         }
 
         // walk button is pressed
-        if (input & WALK) {
-            if (input & FORTH) return STATE_WALK;
-            if (input & BACK)  return STATE_BACK;
-            if (input & LEFT)  return STATE_STEP_LEFT;
-            if (input & RIGHT) return STATE_STEP_RIGHT;
-            return STATE_STOP;
+        if ((input & WALK) && animation.index != ANIM_RUN_START) {
+            float ext = angle.y;
+
+            if (input & FORTH) { 
+                res = STATE_WALK;
+            } else if (input & BACK) {
+                res = STATE_BACK;
+                ext += PI;
+            } else if (input & LEFT) {
+                res = STATE_STEP_LEFT;
+                ext -= PI * 0.5f;
+            } else if (input & RIGHT) {
+                res = STATE_STEP_RIGHT;
+                ext += PI * 0.5f;
+            }
+
+            int maxAscent  = 256 + 128;
+            int maxDescent = maxAscent;
+
+            if (state == STATE_STEP_LEFT || state == STATE_STEP_RIGHT)
+                maxAscent = maxDescent = 64;
+
+            if (state == STATE_STOP && res != STATE_STOP) {
+                vec3 p = pos;
+                collision  = Collision(level, getRoomIndex(), p, vec3(0.0f), vec3(0.0f), LARA_RADIUS * 1.1f, ext, 0, LARA_HEIGHT, maxAscent, maxDescent);
+                if (collision.side == Collision::FRONT)
+                    res = STATE_STOP;
+            }
+
+            return res;
         }
 
         if ((input & ACTION) && emptyHands()) {
             if (state == STATE_PUSH_PULL_READY && (input & (FORTH | BACK))) {
                 int pushState = (input & FORTH) ? STATE_PUSH_BLOCK : STATE_PULL_BLOCK;
                 Block *block = getBlock();
-                if (animation.canSetState(pushState) && block->doMove((input & FORTH) != 0)) {
-                    alignToWall(-LARA_RADIUS);
+                if (block && animation.canSetState(pushState) && block->doMove((input & FORTH) != 0))
                     return pushState;
-                }
             }
 
             if (state == STATE_PUSH_PULL_READY || getBlock())
@@ -1502,9 +1626,11 @@ struct Lara : Character {
         }
 
         // only dpad buttons pressed
-        if (input & FORTH) return STATE_RUN;
-        if (input & BACK)  return STATE_FAST_BACK;
-        if (input & (LEFT | RIGHT)) {
+        if (input & FORTH)
+            res = STATE_RUN;
+        else if (input & BACK)
+            res = STATE_FAST_BACK;
+        else if (input & (LEFT | RIGHT)) {
             if (state == STATE_FAST_TURN)
                 return state;
 
@@ -1512,7 +1638,15 @@ struct Lara : Character {
             if (input & RIGHT) return (state == STATE_TURN_RIGHT && animation.prev == animation.index) ? STATE_FAST_TURN : STATE_TURN_RIGHT;
         }
 
-        return STATE_STOP;
+        if (state == STATE_STOP && res != STATE_STOP) {
+            float ext = angle.y + (res == STATE_RUN ? 0.0f : PI);
+            vec3 p = pos;
+            collision  = Collision(level, getRoomIndex(), p, vec3(0.0f), vec3(0.0f), LARA_RADIUS * 1.1f, ext, 0, LARA_HEIGHT, 256 + 128, 0xFFFFFF);
+            if (collision.side == Collision::FRONT)
+                res = STATE_STOP;
+        }
+
+        return res;
     }
 
     void slideStart() {
@@ -1729,6 +1863,12 @@ struct Lara : Character {
         }
     }
 
+    virtual void update() {
+        collisionOffset = vec3(0.0f);
+        checkCollisions();
+        Character::update();
+    }
+
     virtual void updateAnimation(bool commands) {
         Controller::updateAnimation(commands);
         updateWeapon();
@@ -1858,7 +1998,7 @@ struct Lara : Character {
         vTilt *= rotFactor.y;
         updateTilt(state == STATE_RUN || stand == STAND_UNDERWATER, vTilt.x, vTilt.y);
 
-        if (velocity.length() >= 1.0f)
+        if ((velocity + collisionOffset).length2() >= 1.0f)
             move();
 
         if (getEntity().type != TR::Entity::LARA) {
@@ -1879,32 +2019,63 @@ struct Lara : Character {
         return getEntity().type == TR::Entity::LARA ? pos : chestOffset;
     }
 
-    void move() {
-        //TR::Entity &e = getEntity();
-        //TR::Level::FloorInfo info;
+    void checkCollisions() {
+    // check static objects (TODO: check linked rooms?)
+        TR::Room &room = getRoom();
+        Box box(pos - vec3(LARA_RADIUS, LARA_HEIGHT, LARA_RADIUS), pos + vec3(LARA_RADIUS, 0.0f, LARA_RADIUS));
 
-        //float f, c;
-        //bool canPassGap = true;
-        /*
-        if (velocity != 0.0f) {
-            vec3 dir = velocity.normal() * 128.0f;
-            vec3 p = pos + dir;
-            level->getFloorInfo(e.room, (int)p.x, (int)p.y, (int)p.z, info);
-            if (info.floor < p.y - (256 + 128)  || info.ceiling > p.y - 768) { // wall
-                vec3 axis   = dir.axisXZ();
-                vec3 normal = (p - vec3(int(p.x / 1024.0f) * 1024.0f + 512.0f, p.y, int(p.z / 1024.0f) * 1024.0f + 512.0f)).axisXZ();
-                LOG("%f %f = %f %f = %f\n", axis.x, axis.z, normal.x, normal.z, abs(axis.dot(normal)));
-                if (abs(axis.dot(normal)) > EPS) {
-                    canPassGap = false;
-                } else {
-                    updateEntity();
-                    checkRoom();
-                    return;
-                }
-            }
+        for (int i = 0; i < room.meshesCount; i++) {
+            TR::Room::Mesh &m  = room.meshes[i];
+            TR::StaticMesh &sm = level->staticMeshes[m.meshIndex];
+            if (sm.flags != 2) continue;
+            Box meshBox;
+            sm.getBox(true, m.rotation, meshBox);
+            meshBox.translate(vec3(float(m.x), float(m.y), float(m.z)));
+            if (!box.intersect(meshBox)) continue;
+
+            collisionOffset += meshBox.pushOut2D(box);
         }
-        */
-        vec3 vel = velocity * Core::deltaTime * 30.0f;
+
+        if (!canHitAnim()) {
+            hitDir = -1;
+            return;
+        }
+
+    // check enemies
+        for (int i = 0; i < level->entitiesCount; i++) {
+            TR::Entity &e = level->entities[i];
+            if (!e.flags.active || !e.isEnemy()) continue;
+            Character *enemy = (Character*)e.controller;
+            if (enemy->health <= 0) continue;
+
+            vec3 dir = pos - vec3(0.0f, 128.0f, 0.0f) - enemy->pos;
+            vec3 p   = dir.rotateY(-enemy->angle.y);
+
+            Box enemyBox = enemy->getBoundingBoxLocal();
+            if (!enemyBox.contains(p))
+                continue;
+
+        // get shift
+            p += enemyBox.pushOut2D(p);
+            p = (p.rotateY(enemy->angle.y) + enemy->pos) - pos;
+            collisionOffset += vec3(p.x, 0.0f, p.z);
+
+        // get hit dir
+            if (hitDir == -1) {
+                if (health > 0)
+                    playSound(TR::SND_HIT, pos, Sound::PAN);
+                hitTime = 0.0f;
+            }
+
+            hitDir = angleQuadrant(dir.rotateY(angle.y + PI * 0.5f).angleY());
+            return;
+        }
+
+        hitDir = -1;
+    }
+
+    void move() {
+        vec3 vel = velocity * Core::deltaTime * 30.0f + collisionOffset;
         vec3 opos(pos), offset(0.0f);
 
         float radius   = stand == STAND_UNDERWATER ? LARA_RADIUS_WATER : LARA_RADIUS;
@@ -2011,6 +2182,16 @@ struct Lara : Character {
 
         if (collision.side == Collision::FRONT) {
             int floor = collision.info[Collision::FRONT].floor;
+/*
+            switch (angleQuadrant(angleExt - angle.y)) {
+                case 0 : collision.side = Collision::FRONT; LOG("FRONT\n"); break;
+                case 1 : collision.side = Collision::RIGHT; LOG("RIGHT\n"); break;
+                case 2 : collision.side = Collision::BACK;  LOG("BACK\n");  break;
+                case 3 : collision.side = Collision::LEFT;  LOG("LEFT\n");  break;
+            }
+*/
+            if (velocity.dot(getDir()) <= EPS) 
+                collision.side = Collision::NONE;
 
         // hit the wall
             switch (stand) {
@@ -2028,7 +2209,9 @@ struct Lara : Character {
                     break;
                 case STAND_GROUND :
                 case STAND_HANG   :
-                    if (opos.y - floor > (256 * 3 - 128) && state == STATE_RUN)
+                    if (stand == STAND_GROUND && state != STATE_ROLL_1 && state != STATE_ROLL_2 && (pos - opos).length2() < 16)
+                        animation.setAnim(ANIM_STAND_NORMAL);
+                    else if (opos.y - floor > (256 * 3 - 128) && state == STATE_RUN)
                         animation.setAnim(isLeftFoot ? ANIM_SMASH_RUN_LEFT : ANIM_SMASH_RUN_RIGHT);
                     else if (stand == STAND_HANG)
                         animation.setAnim(ANIM_HANG, -21);

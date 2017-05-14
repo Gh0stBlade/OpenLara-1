@@ -8,7 +8,6 @@
 #include "collision.h"
 
 #define GRAVITY     (6.0f * 30.0f)
-#define NO_OVERLAP  0x7FFFFFFF
 #define SPRITE_FPS  10.0f
 
 #define MAX_LAYERS  4
@@ -17,9 +16,11 @@ struct Controller;
 
 struct IGame {
     virtual ~IGame() {}
-    virtual TR::Level*   getLevel()  { return NULL; }
-    virtual MeshBuilder* getMesh()   { return NULL; }
-    virtual Controller*  getCamera() { return NULL; }
+    virtual TR::Level*   getLevel()     { return NULL; }
+    virtual MeshBuilder* getMesh()      { return NULL; }
+    virtual Controller*  getCamera()    { return NULL; }
+    virtual uint16       getRandomBox(uint16 zone, uint16 *zones) { return 0; }
+    virtual uint16       findPath(int ascend, int descend, int boxStart, int boxEnd, uint16 *zones, uint16 **boxes) { return 0; }
     virtual void setClipParams(float clipSign, float clipHeight) {}
     virtual void setWaterParams(float height) {}
     virtual void updateParams() {}
@@ -178,38 +179,6 @@ struct Controller {
         return pos;
     }
 
-    int getOverlap(int fromX, int fromY, int fromZ, int toX, int toZ) const {
-        int dx, dz;
-        TR::Room::Sector &s = level->getSector(getEntity().room, fromX, fromZ, dx, dz);
-        
-        if (s.boxIndex == 0xFFFF)
-            return NO_OVERLAP;      
-
-        TR::Box &b = level->boxes[s.boxIndex];
-        if (b.contains(toX, toZ))
-            return 0;
-
-        int floor = NO_OVERLAP;
-        int delta = NO_OVERLAP;
-
-        TR::Overlap *o = &level->overlaps[b.overlap.index];
-        do {
-            TR::Box &ob = level->boxes[o->boxIndex];
-            if (ob.contains(toX, toZ)) { // get min delta
-                int d = abs(b.floor - ob.floor);
-                if (d < delta) {
-                    floor = ob.floor;
-                    delta = d;
-                }
-            }
-        } while (!(o++)->end);
-
-        if (floor == NO_OVERLAP)
-            return NO_OVERLAP;
-
-        return b.floor - floor;
-    }
-
     Sound::Sample* playSound(int id, const vec3 &pos, int flags) const {
         if (level->version == TR::Level::VER_TR1_PSX && id == TR::SND_SECRET)
             return NULL;
@@ -276,12 +245,50 @@ struct Controller {
         return true;
     }
 
-    virtual Box getBoundingBox() {
+    Box getBoundingBox() {
         return getBoundingBoxLocal() * getMatrix();
     }
 
-    virtual Box getBoundingBoxLocal() {
-        return animation.getBoundingBox(vec3(0, 0, 0), 0);
+    Box getBoundingBoxLocal(bool oriented = false) {
+        return animation.getBoundingBox(vec3(0, 0, 0), oriented ? getEntity().rotation.value / 0x4000 : 0);
+    }
+
+    void getSpheres(Sphere *spheres) {
+        TR::Model *m = getModel();
+        Basis basis(getMatrix());
+
+        for (int i = 0; i < m->mCount; i++) {
+            TR::Mesh &aMesh = level->meshes[level->meshOffsets[m->mStart + i]];
+            vec3 center = animation.getJoints(basis, i, true) * aMesh.center;
+            spheres[i] = Sphere(center, aMesh.radius);
+        }
+
+    }
+
+    bool collide(Controller *controller) {
+        TR::Model *a = getModel();
+        TR::Model *b = getModel();
+        if (!a || !b) 
+            return false;
+
+        if (!getBoundingBox().intersect(controller->getBoundingBox()))
+            return false;
+
+        ASSERT(a->mCount <= 34);
+        ASSERT(b->mCount <= 34);
+
+        Sphere aSpheres[34];
+        Sphere bSpheres[34];
+
+        getSpheres(aSpheres);
+        controller->getSpheres(bSpheres);
+
+        for (int i = 0; i < a->mCount; i++)        
+            for (int j = 0; j < b->mCount; j++)
+                if (aSpheres[i].intersect(bSpheres[j]))
+                    return true;
+
+        return false;
     }
 
     vec3 trace(int fromRoom, const vec3 &from, const vec3 &to, int &room, bool isCamera) { // TODO: use Bresenham
@@ -536,19 +543,19 @@ struct Controller {
         if (Core::pass != Core::passCompose || !TR::castShadow(entity.type))
             return;
 
+        Box box = animation.getBoundingBox(pos, 0);
+        vec3 center = box.center();
+
         TR::Level::FloorInfo info;
-        level->getFloorInfo(entity.room, entity.x, entity.y, entity.z, info);
+        level->getFloorInfo(entity.room, int(center.x), int(center.y), int(center.z), info);
 
-        Box box = animation.getBoundingBox(vec3(0, 0, 0), 0);
-
-        const vec3 fpos   = vec3(float(entity.x), info.floor - 16.0f, float(entity.z));
-        const vec3 offset = box.center();
-        const vec3 size   = box.size();
+        const vec3 fpos = vec3(pos.x, info.floor - 16.0f, pos.z);
+        const vec3 size = box.size();
 
         mat4 m = Core::mViewProj;
         m.translate(fpos);
         m.rotateY(angle.y);
-        m.translate(vec3(offset.x, 0.0f, offset.z));
+        m.translate(vec3(center.x - pos.x, 0.0f, center.z - pos.z));
         m.scale(vec3(size.x, 0.0f, size.z) * (1.0f / 1024.0f));        
 
         Basis b;
@@ -557,7 +564,7 @@ struct Controller {
         game->setShader(Core::pass, Shader::FLASH, false, false);
         Core::active.shader->setParam(uViewProj, m);
         Core::active.shader->setParam(uBasis, b);
-        float alpha = lerp(0.7f, 0.90f, clamp((fpos.y - pos.y) / 1024.0f, 0.0f, 1.0f) );
+        float alpha = lerp(0.7f, 0.90f, clamp((fpos.y - box.max.y) / 1024.0f, 0.0f, 1.0f) );
         Core::active.shader->setParam(uMaterial, vec4(vec3(0.5f * (1.0f - alpha)), alpha));
         Core::active.shader->setParam(uAmbient, vec3(0.0f));
 
