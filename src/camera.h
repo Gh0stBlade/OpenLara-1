@@ -50,6 +50,8 @@ struct Camera : ICamera {
             room  = level->entities[level->cutEntity].room;
         } else
             state = STATE_FOLLOW;
+        destPos  = owner->pos - owner->getDir() * 1024.0f;
+        pos      = destPos;
         advTimer = -1.0f;
     }
 
@@ -113,10 +115,13 @@ struct Camera : ICamera {
         this->viewIndex = viewIndex;
         this->timer     = timer;
         this->speed     = speed;
-        lastDest        = pos;
+        lastDest        = destPos;
 
-        if (viewIndex > -1)
-            room = level->cameras[viewIndex].room;
+        if (viewIndex > -1) {
+            TR::Camera &cam = level->cameras[viewIndex];
+            room = cam.room;
+            pos  = vec3(float(cam.x), float(cam.y), float(cam.z));
+        }
     }
 
     vec3 getViewPoint() {
@@ -129,6 +134,9 @@ struct Camera : ICamera {
     }
 
     void resetTarget(const vec3 &viewPoint) {
+        if (state == STATE_STATIC)
+            pos = destPos = lastDest;
+
         timer      = -1.0f;
         state      = STATE_FOLLOW;
         viewTarget = NULL;

@@ -373,6 +373,7 @@ struct Door : Controller {
                     s.ceiling    = TR::NO_FLOOR;
 
                     if (sectors[i].boxIndex != TR::NO_BOX) {
+                        ASSERT(sectors[i].boxIndex < level->boxesCount);
                         TR::Box &box = level->boxes[sectors[i].boxIndex];
                         if (box.overlap.blockable)
                             box.overlap.block = true;
@@ -494,6 +495,22 @@ struct TrapFloor : Controller {
 struct Bridge : Controller {
     Bridge(IGame *game, int entity) : Controller(game, entity) {
         getEntity().flags.collision = true;
+    }
+};
+
+struct Drawbridge : Controller {
+    enum {
+        STATE_UP,
+        STATE_DOWN,
+    };
+
+    Drawbridge(IGame *game, int entity) : Controller(game, entity) {
+        getEntity().flags.collision = true;
+    }
+
+    virtual void update() {
+        updateAnimation(true);
+        animation.setState(isActive() ? STATE_DOWN : STATE_UP);
     }
 };
 
@@ -623,6 +640,38 @@ struct TrapCeiling : Controller {
     }
 };
 
+#define SLAM_DAMAGE 400
+
+struct TrapSlam : Controller {
+    enum {
+        STATE_OPEN,
+        STATE_SLAM,
+    };
+    
+    bool bite;
+
+    TrapSlam(IGame *game, int entity) : Controller(game, entity), bite(false) {}
+
+    virtual void update() {
+        if (isActive()) {
+            animation.setState(STATE_SLAM);
+
+            if (animation.frameIndex >= 20)
+                bite = false;
+
+            Character *lara = (Character*)level->laraController;
+            if (animation.state == STATE_SLAM && !bite && collide(lara)) {
+                lara->hit(SLAM_DAMAGE, this, TR::HIT_SLAM);
+                bite = true;
+            }
+
+        } else
+            animation.setState(STATE_OPEN);
+
+        updateAnimation(true);
+    }
+};
+
 
 struct TrapSword : Controller {
     TrapSword(IGame *game, int entity) : Controller(game, entity) {}
@@ -631,6 +680,35 @@ struct TrapSword : Controller {
         updateAnimation(true);
     }
 };
+
+
+struct TrapLava : Controller {
+    bool done;
+
+    TrapLava(IGame *game, int entity) : Controller(game, entity), done(false) {}
+
+    virtual void update() {
+        Character *lara = (Character*)level->laraController;
+        if (lara->health > 0.0f && collide(lara))
+            lara->hit(1000.0f, this, TR::HIT_FLAME);
+
+        if (done) {
+            deactivate();
+            return;
+        }
+
+        vec3 dir = getDir();
+        pos += dir * (25.0f * 30.0f * Core::deltaTime);
+
+        updateEntity();
+        int roomIndex = getRoomIndex();
+        TR::Room::Sector *s = level->getSector(roomIndex, int(pos.x + dir.x * 2048.0f), int(pos.y), int(pos.z + dir.z * 2048.0f));
+        if (!s || s->floor * 256 != int(pos.y))
+            done = true;
+        getEntity().room = roomIndex;
+    }
+};
+
 
 struct KeyHole : Controller {
     KeyHole(IGame *game, int entity) : Controller(game, entity) {}
@@ -648,6 +726,7 @@ struct KeyHole : Controller {
 
     virtual void update() {}
 };
+
 
 struct Waterfall : Controller {
     #define SPLASH_TIMESTEP (1.0f / 30.0f)

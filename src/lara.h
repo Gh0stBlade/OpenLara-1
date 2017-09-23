@@ -105,6 +105,9 @@ struct Lara : Character {
         ANIM_HIT_BACK           = 126,
         ANIM_HIT_LEFT           = 127,
         ANIM_HIT_RIGHT          = 128,
+
+        ANIM_DEATH_BOULDER      = 139,
+
         ANIM_STAND_ROLL_BEGIN   = 146,
         ANIM_STAND_ROLL_END     = 147,
 
@@ -440,6 +443,7 @@ struct Lara : Character {
         //reset(14, vec3(40448, 3584, 60928), PI * 0.5f, STAND_ONWATER);  // gym (pool)
         //reset(0, vec3(74858, 3072, 20795), 0);           // level 1 (dart)
         //reset(14, vec3(20215, 6656, 52942), PI);         // level 1 (bridge)
+        //reset(20, vec3(8952, 3840, 68071), PI);          // level 1 (crystal)
         //reset(33, vec3(48229, 4608, 78420), 270 * DEG2RAD);     // level 1 (end)
         //reset(15, vec3(70067, -256, 29104), -0.68f);     // level 2 (pool)
         //reset(26, vec3(71980, 1546, 19000), 270 * DEG2RAD);     // level 2 (underwater switch)
@@ -459,8 +463,13 @@ struct Lara : Character {
         //reset(5, vec3(73394, 3840, 60758), 0);           // level 3b (scion)
         //reset(20, vec3(57724, 6656, 61941), 90 * DEG2RAD); // level 3b (boulder)
         //reset(99,  vec3(45562, -3328, 63366), 225 * DEG2RAD); // level 7a (flipmap)
+        //reset(57,  vec3(54844, -3328, 53145), 0);        // level 8b (bridge switch)
+        //reset(12,  vec3(34236, -2415, 14974), 0);        // level 8b (sphinx)
         //reset(0,  vec3(40913, -1012, 42252), PI);        // level 8c
         //reset(10, vec3(90443, 11264 - 256, 114614), PI, STAND_ONWATER);   // villa mortal 2
+        //reset(50, vec3(53703, -18688, 13769), PI);      // Level 10c (scion holder)
+        //reset(19, vec3(35364, -512, 40199), PI * 0.5f);  // Level 10c (lava flow)
+        //reset(9, vec3(69074, -14592, 25192), 0);  // Level 10c (trap slam)
     #endif
         chestOffset = animation.getJoints(getMatrix(), 7).pos;
     }
@@ -1292,11 +1301,15 @@ struct Lara : Character {
         }
     }
 
-    void addBlood(float radius, float height, const vec3 &spriteVelocity) {
-        vec3 p = pos + vec3((randf() * 2.0f - 1.0f) * radius, -randf() * height, (randf() * 2.0f - 1.0f) * radius);
-        int index = Sprite::add(game, TR::Entity::BLOOD, getRoomIndex(), int(p.x), int(p.y), int(p.z), Sprite::FRAME_ANIMATED);
+    void addBlood(const vec3 &sprPos, const vec3 &sprVel) {
+        int index = Sprite::add(game, TR::Entity::BLOOD, getRoomIndex(), int(sprPos.x), int(sprPos.y), int(sprPos.z), Sprite::FRAME_ANIMATED);
         if (index > -1)
-            ((Sprite*)level->entities[index].controller)->velocity = spriteVelocity;
+            ((Sprite*)level->entities[index].controller)->velocity = sprVel;
+    }
+
+    void addBlood(float radius, float height, const vec3 &sprVel) {
+        vec3 p = pos + vec3((randf() * 2.0f - 1.0f) * radius, -randf() * height, (randf() * 2.0f - 1.0f) * radius);
+        addBlood(p, sprVel);
     }
 
     void addBloodSpikes() {
@@ -1309,6 +1322,10 @@ struct Lara : Character {
         addBlood(64.0f, 744.0f, vec3(sinf(ang), 0.0f, cosf(ang)) * speed);
     }
 
+    void addBloodSlam(Controller *trapSlam) {
+        for (int i = 0; i < 6; i++)
+            addBloodSpikes();
+    }
 
     virtual void hit(float damage, Controller *enemy = NULL, TR::HitType hitType = TR::HIT_DEFAULT) {
         if (dozy) return;
@@ -1319,18 +1336,19 @@ struct Lara : Character {
 
         Character::hit(damage, enemy, hitType);
 
-        if (hitType == TR::HIT_BLADE)
-            addBloodBlade();
-
-        if (hitType == TR::HIT_SPIKES)
-            addBloodSpikes();
+        switch (hitType) {
+            case TR::HIT_BLADE  : addBloodBlade(); break;
+            case TR::HIT_SPIKES : addBloodSpikes(); break;
+            case TR::HIT_SLAM   : addBloodSlam(enemy); break;
+            default             : ;
+        }
 
         if (health > 0.0f)
             return;
 
         switch (hitType) {
             case TR::HIT_BOULDER : {
-                animation.setAnim(level->models[TR::MODEL_LARA_SPEC].animation + 2);
+                animation.setAnim(ANIM_DEATH_BOULDER);
                 angle = enemy->angle;
                 TR::Level::FloorInfo info;
                 level->getFloorInfo(getRoomIndex(), int(pos.x), int(pos.y), int(pos.z), info);
@@ -1638,6 +1656,10 @@ struct Lara : Character {
         bool needFlip = false;
         TR::Effect effect = TR::Effect::NONE;
 
+        int         cameraIndex  = -1;
+        Controller *cameraTarget = NULL;
+        Camera *camera = (Camera*)level->cameraController;
+
         while (cmdIndex < info.trigCmdCount) {
             TR::FloorData::TriggerCommand &cmd = info.trigCmd[cmdIndex++];
 
@@ -1666,8 +1688,6 @@ struct Lara : Character {
                     break;
                 }
                 case TR::Action::CAMERA_SWITCH : {
-                    Camera *camera = (Camera*)level->cameraController;
-
                     TR::FloorData::TriggerCommand &cam = info.trigCmd[cmdIndex++];
                     if (level->cameras[cmd.args].flags.once)
                         break;
@@ -1677,10 +1697,13 @@ struct Lara : Character {
                     if (info.trigger == TR::Level::Trigger::SWITCH && info.trigInfo.timer && switchIsDown)
                         break;
  
-                    {//if (info.trigger == TR::Level::Trigger::SWITCH || cmd.args != camera->viewIndexLast) {
+                    if (info.trigger == TR::Level::Trigger::SWITCH || cmd.args != camera->viewIndexLast) {
                         level->cameras[cmd.args].flags.once |= cam.once;
                         camera->setView(cmd.args, cam.timer == 1 ? EPS : float(cam.timer), cam.speed * 8.0f);
                     }
+
+                    if (cmd.args == camera->viewIndexLast)
+                        cameraIndex = cmd.args;
 
                     break;
                 }
@@ -1714,7 +1737,7 @@ struct Lara : Character {
                         needFlip = true;
                     break;
                 case TR::Action::CAMERA_TARGET :
-                    ((Camera*)level->cameraController)->viewTarget = (Controller*)level->entities[cmd.args].controller;
+                    cameraTarget = (Controller*)level->entities[cmd.args].controller;
                     break;
                 case TR::Action::END :
                     game->loadLevel(level->id == TR::LEVEL_10C ? TR::TITLE : TR::LevelID(level->id + 1));
@@ -1758,6 +1781,12 @@ struct Lara : Character {
             }
         }
 
+        if (cameraTarget && (camera->state == Camera::STATE_STATIC || cameraIndex == -1))
+           camera->viewTarget = cameraTarget;
+
+        if (!cameraTarget && cameraIndex > -1)
+            camera->viewIndex = cameraIndex;
+
         if (needFlip) {
             level->isFlipped = !level->isFlipped;
             game->setEffect(effect, 0);
@@ -1798,7 +1827,7 @@ struct Lara : Character {
         TR::Level::FloorInfo info;
         level->getFloorInfo(e.room, e.x, e.y, e.z, info);
 
-        if (stand == STAND_SLIDE || (stand == STAND_AIR && velocity.y > 0) || stand == STAND_GROUND) {
+        if (stand == STAND_SLIDE || stand == STAND_AIR || stand == STAND_GROUND) {
             if (e.y + 8 >= info.floor && (abs(info.slantX) > 2 || abs(info.slantZ) > 2)) {
                 if (stand == STAND_AIR)
                     playSound(TR::SND_LANDING, pos, Sound::Flags::PAN);
@@ -2443,7 +2472,7 @@ struct Lara : Character {
 
         collisionOffset = vec3(0.0f);
 
-        if (checkCollisions() || (velocity + collisionOffset).length2() >= 1.0f)
+        if (checkCollisions() || (velocity + collisionOffset).length2() >= 1.0f) // TODO: stop & smash anim
             move();
 
         if (getEntity().type != TR::Entity::LARA) {
@@ -2481,25 +2510,28 @@ struct Lara : Character {
             collisionOffset += meshBox.pushOut2D(box);
         }
 
-        if (!canHitAnim()) {
-            hitDir = -1;
-            return false;
-        }
-
     // check enemies & doors
-        Controller *controller = Controller::first;
-        do {
-            TR::Entity &e = controller->getEntity();
+        for (int i = 0; i < level->entitiesBaseCount; i++) {
+            TR::Entity &e = level->entities[i];
+            
+            if (!e.isCollider()) continue;
+
+            Controller *controller = (Controller*)e.controller;
 
             if (e.isEnemy()) {
                 if (e.type != TR::Entity::ENEMY_REX && (!e.flags.active || ((Character*)controller)->health <= 0)) continue;
-            } else 
-                if (!e.isDoor()) continue;
+            } else {
+            // fast distance check for object
+                TR::Entity &entity = getEntity(); 
+                if (abs(entity.x - e.x) > 1024 || abs(entity.z - e.z) > 1024 || abs(entity.y - e.y) > 2048) continue;
+            }
 
             vec3 dir = pos - vec3(0.0f, 128.0f, 0.0f) - controller->pos;
             vec3 p   = dir.rotateY(controller->angle.y);
 
             Box box = controller->getBoundingBoxLocal();
+            box.expand(vec3(LARA_RADIUS, 0.0f, LARA_RADIUS));
+
             if (!box.contains(p))
                 continue;
 
@@ -2515,19 +2547,21 @@ struct Lara : Character {
 
             if (e.type == TR::Entity::ENEMY_REX && ((Character*)controller)->health <= 0)
                 return true;
-            if (e.isDoor())
+            if (!e.isEnemy())
                 return true;
 
-        // get hit dir
-            if (hitDir == -1) {
-                if (health > 0)
-                    playSound(TR::SND_HIT, pos, Sound::PAN);
-                hitTime = 0.0f;
-            }
+            if (canHitAnim()) {
+            // get hit dir
+                if (hitDir == -1) {
+                    if (health > 0)
+                        playSound(TR::SND_HIT, pos, Sound::PAN);
+                    hitTime = 0.0f;
+                }
 
-            hitDir = angleQuadrant(dir.rotateY(angle.y + PI * 0.5f).angleY());
-            return true;
-        } while ((controller = controller->next));
+                hitDir = angleQuadrant(dir.rotateY(angle.y + PI * 0.5f).angleY());
+                return true;
+            }
+        };
 
         hitDir = -1;
         return false;

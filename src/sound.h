@@ -531,8 +531,12 @@ namespace Sound {
                 i += res;
             }
         // apply volume
+            #define VOL_CONV(x) (1.0f - sqrtf(1.0f - x * x));
+
+            float m = ((flags & Flags::MUSIC) ? Core::settings.audio.music : Core::settings.audio.sound);
+            float v = volume * m;
             vec2 pan = getPan();
-            vec2 vol = pan * volume;
+            vec2 vol = pan * VOL_CONV(v);
             for (int j = 0; j < i; j++) {
                 if (volumeDelta != 0.0f) { // increase / decrease channel volume
                     volume += volumeDelta;
@@ -543,11 +547,14 @@ namespace Sound {
                         if (stopAfterFade)
                             isPlaying = false;
                     }
-                    vol = pan * volume;
+                    v   = volume * m;
+                    vol = pan * VOL_CONV(v);
                 }
                 frames[j].L = int(frames[j].L * vol.x);
                 frames[j].R = int(frames[j].R * vol.y);
             }
+            #undef VOL_CONV
+
             return true;
         }
 
@@ -626,11 +633,22 @@ namespace Sound {
         }
     }
 
+    void convFrames(FrameHI *from, Frame *to, int count) {
+        for (int i = 0; i < count; i++) {
+            to[i].L = clamp(from[i].L, -32768, 32767);
+            to[i].R = clamp(from[i].R, -32768, 32767);
+        }
+    }
+
     void fill(Frame *frames, int count) {
         if (!channelsCount) {
-            memset(frames, 0, sizeof(frames[0]) * count);
-            //if (Core::settings.audio.reverb)
-            //    reverb.process(frames, count);
+            if (result) {
+                memset(result, 0, sizeof(FrameHI) * count);
+                if (Core::settings.audio.reverb)
+                    reverb.process(result, count);
+                convFrames(result, frames, count);
+            } else
+                memset(frames, 0, sizeof(frames[0]) * count);
             return;
         }
 
@@ -644,10 +662,7 @@ namespace Sound {
 
         renderChannels(result, count, true);
 
-        for (int i = 0; i < count; i++) {
-            frames[i].L = clamp(result[i].L, -32768, 32767);
-            frames[i].R = clamp(result[i].R, -32768, 32767);
-        }
+        convFrames(result, frames, count);
 
         for (int i = 0; i < channelsCount; i++) 
             if (!channels[i]->isPlaying) {

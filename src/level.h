@@ -36,9 +36,9 @@ struct Level : IGame {
         float   clipHeight;
     } *params = (Params*)&Core::params;
 
+    ZoneCache    *zoneCache;
     AmbientCache *ambientCache;
     WaterCache   *waterCache;
-    ZoneCache    *zoneCache;
 
     Sound::Sample *sndSoundtrack;
     Sound::Sample *sndUnderwater;
@@ -67,6 +67,52 @@ struct Level : IGame {
             case TR::VER_TR1_PSX : strcat(buf, ".PSX"); break;
         }
         new Stream(buf, loadAsync);
+    }
+
+    virtual void loadGame(int slot) {
+        //
+    }
+
+    virtual void saveGame(int slot) {
+        //
+    }
+
+    virtual void applySettings(const Core::Settings &settings) {
+        if (settings.detail.filter != Core::settings.detail.filter)
+            atlas->setFilterQuality(settings.detail.filter);
+
+        bool rebuildMesh    = settings.detail.water != Core::settings.detail.water;
+        bool rebuildAmbient = settings.detail.lighting != Core::settings.detail.lighting;
+        bool rebuildShadows = settings.detail.shadows  != Core::settings.detail.shadows;
+        bool rebuildWater   = settings.detail.water != Core::settings.detail.water;
+        bool rebuildShaders = rebuildWater || rebuildAmbient || rebuildShadows;
+
+        Core::settings = settings;
+
+        if (rebuildShaders) {
+            delete shaderCache;
+            shaderCache = new ShaderCache();
+        }
+
+        if (rebuildMesh) {
+            delete mesh;
+            mesh = new MeshBuilder(level);
+        }
+
+        if (rebuildAmbient) {
+            delete ambientCache;
+            ambientCache = Core::settings.detail.lighting > Core::Settings::MEDIUM ? new AmbientCache(this) : NULL;
+        }
+
+        if (rebuildShadows) {
+            delete shadow;
+            shadow = Core::settings.detail.shadows > Core::Settings::LOW ? new Texture(SHADOW_TEX_SIZE, SHADOW_TEX_SIZE, Texture::SHADOW, false) : NULL;
+        }
+            
+        if (rebuildWater) {
+            delete waterCache;
+            waterCache = Core::settings.detail.water > Core::Settings::LOW ? new WaterCache(this) : NULL;
+        }
     }
 
     virtual TR::Level* getLevel() {
@@ -106,10 +152,6 @@ struct Level : IGame {
 
     virtual void setWaterParams(float height) {
         params->waterHeight = height;
-    }
-
-    virtual void updateParams() {
-        Core::active.shader->setParam(uParam, Core::params);
     }
 
     virtual void waterDrop(const vec3 &pos, float radius, float strength) {
@@ -161,6 +203,10 @@ struct Level : IGame {
             Sound::Sample *sample = playSound(TR::SND_FLOOD, vec3(), 0);
             if (sample)
                 sample->setVolume(0.0f, 4.0f);
+        }
+
+        if (effect == TR::Effect::STAIRS2SLOPE) {
+            playSound(TR::SND_EFFECT_8, vec3(), 0);
         }
 
         this->effect      = effect;
@@ -351,6 +397,9 @@ struct Level : IGame {
                 case TR::Entity::TRAP_DARTGUN          :
                     entity.controller = new TrapDartgun(this, i);
                     break;
+                case TR::Entity::DRAWBRIDGE            :
+                    entity.controller = new Drawbridge(this, i);
+                    break;
                 case TR::Entity::BLOCK_1               :
                 case TR::Entity::BLOCK_2               :
                 case TR::Entity::BLOCK_3               :
@@ -358,11 +407,14 @@ struct Level : IGame {
                     entity.controller = new Block(this, i);
                     break;                     
                 case TR::Entity::MOVING_BLOCK          :
-                    entity.controller = new MovingBlock(this, i);                    
+                    entity.controller = new MovingBlock(this, i);
                     break;
                 case TR::Entity::TRAP_CEILING_1     :
                 case TR::Entity::TRAP_CEILING_2     :
                     entity.controller = new TrapCeiling(this, i);
+                    break;
+                case TR::Entity::TRAP_SLAM          :
+                    entity.controller = new TrapSlam(this, i);
                     break;
                 case TR::Entity::TRAP_SWORD         :
                     entity.controller = new TrapSword(this, i);
@@ -384,6 +436,9 @@ struct Level : IGame {
                 case TR::Entity::WATERFALL             :
                     entity.controller = new Waterfall(this, i);
                     break;
+                case TR::Entity::TRAP_LAVA             :
+                    entity.controller = new TrapLava(this, i);
+                    break;
                 default                                : 
                     if (entity.modelIndex > 0)
                         entity.controller = new Controller(this, i);
@@ -399,10 +454,10 @@ struct Level : IGame {
             level.cameraController = camera;
             level.laraController   = lara;
 
-            ambientCache = Core::settings.detail.ambient ? new AmbientCache(this) : NULL;
-            waterCache   = Core::settings.detail.water   ? new WaterCache(this)   : NULL;
             zoneCache    = new ZoneCache(this);
-            shadow       = Core::settings.detail.shadows ? new Texture(SHADOW_TEX_SIZE, SHADOW_TEX_SIZE, Texture::SHADOW, false) : NULL;
+            ambientCache = Core::settings.detail.lighting > Core::Settings::MEDIUM ? new AmbientCache(this) : NULL;
+            waterCache   = Core::settings.detail.water    > Core::Settings::LOW    ? new WaterCache(this)   : NULL;
+            shadow       = Core::settings.detail.shadows  > Core::Settings::LOW    ? new Texture(SHADOW_TEX_SIZE, SHADOW_TEX_SIZE, Texture::SHADOW, false) : NULL;
 
             initReflections();
 
@@ -460,7 +515,6 @@ struct Level : IGame {
     }
 
     static void fillCallback(int id, int width, int height, int tileX, int tileY, void *userData, void *data) {
-        static const uint32 whiteColor = 0xFFFFFFFF;
         static const uint32 barColor[UI::BAR_MAX][25] = {
             // health bar
                 { 0xFF2C5D71, 0xFF5E81AE, 0xFF2C5D71, 0xFF1B4557, 0xFF16304F },
@@ -472,6 +526,8 @@ struct Level : IGame {
                   0x00FFFFFF, 0x80FFFFFF, 0x80FFFFFF, 0x80FFFFFF, 0x00FFFFFF,
                   0x00FFFFFF, 0x60FFFFFF, 0x60FFFFFF, 0x60FFFFFF, 0x00FFFFFF,
                   0x00FFFFFF, 0x20FFFFFF, 0x20FFFFFF, 0x20FFFFFF, 0x00FFFFFF },
+            // white bar (white tile)
+                { 0xFFFFFFFF },
             };
 
         int stride = 256, uvCount;
@@ -504,20 +560,19 @@ struct Level : IGame {
                 uvCount = 4;
 
                 switch (id) {
-                    case UI::BAR_HEALTH :
-                    case UI::BAR_OXYGEN : 
-                    case UI::BAR_OPTION : 
+                    case UI::BAR_HEALTH   :
+                    case UI::BAR_OXYGEN   : 
+                    case UI::BAR_OPTION   :
+                    case UI::BAR_WHITE    :
                         src  = (TR::Color32*)&barColor[id][0];
                         tex  = &barTile[id];
-                        mm.w = 4; // height - 1
-                        if (id == UI::BAR_OPTION) {
-                            stride = 5;
-                            mm.z = 4;
+                        if (id != UI::BAR_WHITE) {
+                            mm.w = 4; // height - 1
+                            if (id == UI::BAR_OPTION) {
+                                stride = 5;
+                                mm.z   = 4;
+                            }
                         }
-                        break;
-                    case 3 : // white color
-                        src  = (TR::Color32*)&whiteColor;
-                        tex  = &whiteTile;
                         break;
                     default : return;
                 }
@@ -588,7 +643,7 @@ struct Level : IGame {
         }
 
     // repack texture tiles
-        Atlas *tiles = new Atlas(level.objectTexturesCount + level.spriteTexturesCount + 4, &level, fillCallback);
+        Atlas *tiles = new Atlas(level.objectTexturesCount + level.spriteTexturesCount + UI::BAR_MAX, &level, fillCallback);
         // add textures
         int texIdx = level.version == TR::VER_TR1_PSX ? 256 : 0; // skip palette color for PSX version
         for (int i = texIdx; i < level.objectTexturesCount; i++) {
@@ -626,8 +681,10 @@ struct Level : IGame {
         tiles->add(short4(8192, 8192, 8192 + 4, 8192 + 4), texIdx++);
         // add white color
         tiles->add(short4(2048, 2048, 2048, 2048), texIdx++);
+
         // get result texture
         atlas = tiles->pack();
+        atlas->setFilterQuality(Core::settings.detail.filter);
 
         delete tiles;
 
@@ -711,8 +768,9 @@ struct Level : IGame {
             setWaterParams(float(room.info.yTop));
         }
 
+        Core::active.shader->setParam(uParam, Core::params);
         Core::active.shader->setParam(uMaterial, vec4(diffuse, ambient, specular, alpha));
-        if (Core::settings.detail.contact)
+        if (Core::settings.detail.shadows > Core::Settings::MEDIUM)
             Core::active.shader->setParam(uContacts, Core::contacts[0], MAX_CONTACTS);
     }
 
@@ -733,7 +791,7 @@ struct Level : IGame {
         if (Core::pass == Core::passShadow)
             return;
 
-        if (Core::settings.detail.contact) {
+        if (Core::settings.detail.shadows > Core::Settings::MEDIUM) {
             Sphere spheres[MAX_CONTACTS];
             int spheresCount;
             lara->getSpheres(spheres, spheresCount);
@@ -828,14 +886,15 @@ struct Level : IGame {
             type = Shader::MIRROR;
 
         if (type == Shader::SPRITE) {
-            float alpha = (entity.type == TR::Entity::SMOKE || entity.type == TR::Entity::WATER_SPLASH) ? 0.75f : 1.0f;                
-            setRoomParams(roomIndex, type, 0.5f, intensityf(lum), controller->specular, alpha, isModel ? !mesh->models[entity.modelIndex - 1].opaque : true);
+            float alpha = (entity.type == TR::Entity::SMOKE || entity.type == TR::Entity::WATER_SPLASH) ? 0.75f : 1.0;
+            float diffuse = entity.isItem() ? 1.0f : 0.5f;
+            setRoomParams(roomIndex, type, diffuse, intensityf(lum), controller->specular, alpha, isModel ? !mesh->models[entity.modelIndex - 1].opaque : true);
         } else
             setRoomParams(roomIndex, type, 1.0f, intensityf(lum), controller->specular, 1.0f, isModel ? !mesh->models[entity.modelIndex - 1].opaque : true);
 
         if (isModel) { // model
             vec3 pos = controller->getPos();
-            if (Core::settings.detail.ambient) {
+            if (ambientCache) {
                 AmbientCache::Cube cube;
                 if (Core::stats.frame != controller->frameIndex) {
                     ambientCache->getAmbient(roomIndex, pos, cube);
@@ -1242,14 +1301,15 @@ struct Level : IGame {
             glLoadIdentity();
             glOrtho(0, Core::width, 0, Core::height, 0, 1);
 
-            if (waterCache->reflect)
-                waterCache->reflect->bind(sDiffuse);
+            if (waterCache && waterCache->count && waterCache->items[0].caustics)
+                waterCache->items[0].caustics->bind(sDiffuse);
             else
                 atlas->bind(sDiffuse);
             glEnable(GL_TEXTURE_2D);
             Core::setCulling(cfNone);
             Core::setDepthTest(false);
             Core::setBlending(bmNone);
+            Core::validateRenderState();
 
             glColor3f(10, 10, 10);
             int w = Core::active.textures[sDiffuse]->width / 2;
