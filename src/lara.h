@@ -462,14 +462,19 @@ struct Lara : Character {
         //reset(27, vec3(72372, 8704, 46547), PI * 0.5f);  // level 3b (spikes)
         //reset(5, vec3(73394, 3840, 60758), 0);           // level 3b (scion)
         //reset(20, vec3(57724, 6656, 61941), 90 * DEG2RAD); // level 3b (boulder)
+        //reset(18, vec3(34914, 11008, 41315), 90 * DEG2RAD); // level 4 (main hall)
+        //reset(19, vec3(33368, 19968, 45643), 270 * DEG2RAD); // level 4 (damocles)
+        //reset(24, vec3(45609, 18176, 41500), 90 * DEG2RAD); // level 4 (thor)
         //reset(99,  vec3(45562, -3328, 63366), 225 * DEG2RAD); // level 7a (flipmap)
         //reset(57,  vec3(54844, -3328, 53145), 0);        // level 8b (bridge switch)
         //reset(12,  vec3(34236, -2415, 14974), 0);        // level 8b (sphinx)
         //reset(0,  vec3(40913, -1012, 42252), PI);        // level 8c
-        //reset(10, vec3(90443, 11264 - 256, 114614), PI, STAND_ONWATER);   // villa mortal 2
+        //reset(30, vec3(69689, -8448, 34922), 330 * DEG2RAD);      // Level 10a (cabin)
+        //reset(27, vec3(52631, -4352, 57893), 270 * DEG2RAD);      // Level 10a (drill)
         //reset(50, vec3(53703, -18688, 13769), PI);      // Level 10c (scion holder)
         //reset(19, vec3(35364, -512, 40199), PI * 0.5f);  // Level 10c (lava flow)
         //reset(9, vec3(69074, -14592, 25192), 0);  // Level 10c (trap slam)
+        //reset(10, vec3(90443, 11264 - 256, 114614), PI, STAND_ONWATER);   // villa mortal 2
     #endif
         chestOffset = animation.getJoints(getMatrix(), 7).pos;
     }
@@ -1349,13 +1354,14 @@ struct Lara : Character {
         switch (hitType) {
             case TR::HIT_BOULDER : {
                 animation.setAnim(ANIM_DEATH_BOULDER);
-                angle = enemy->angle;
+                if (enemy)
+                    angle = enemy->angle;
                 TR::Level::FloorInfo info;
                 level->getFloorInfo(getRoomIndex(), int(pos.x), int(pos.y), int(pos.z), info);
                 vec3 d = getDir();
                 vec3 v = info.getSlant(d);
                 angle.x = -acos(d.dot(v));
-                v = ((TrapBoulder*)enemy)->velocity * 2.0f;
+                v = enemy ? ((TrapBoulder*)enemy)->velocity * 2.0f : vec3(0.0f);
                 for (int i = 0; i < 15; i++)
                     addBlood(256.0f, 512.0f, v);
                 break;
@@ -1559,8 +1565,8 @@ struct Lara : Character {
         return false;
     }
 
-    void checkTrigger() {
-        TR::Entity &e = getEntity();
+    void checkTrigger(Controller *controller, bool heavy) {
+        TR::Entity &e = controller->getEntity();
         TR::Level::FloorInfo info;
         level->getFloorInfo(e.room, e.x, e.y, e.z, info);
 
@@ -1648,6 +1654,7 @@ struct Lara : Character {
                 break;
 
             case TR::Level::Trigger::HEAVY :
+                if (!heavy) return;
                 break;
             case TR::Level::Trigger::DUMMY :
                 return;
@@ -1827,14 +1834,12 @@ struct Lara : Character {
         TR::Level::FloorInfo info;
         level->getFloorInfo(e.room, e.x, e.y, e.z, info);
 
-        if (stand == STAND_SLIDE || stand == STAND_AIR || stand == STAND_GROUND) {
+        if ((stand == STAND_SLIDE || stand == STAND_GROUND) && (state != STATE_FORWARD_JUMP && state != STATE_BACK_JUMP)) {
             if (e.y + 8 >= info.floor && (abs(info.slantX) > 2 || abs(info.slantZ) > 2)) {
-                if (stand == STAND_AIR)
-                    playSound(TR::SND_LANDING, pos, Sound::Flags::PAN);
                 pos.y = float(info.floor);
                 updateEntity();
 
-                if (stand == STAND_GROUND || stand == STAND_AIR)
+                if (stand == STAND_GROUND)
                     slideStart();
 
                 return STAND_SLIDE;
@@ -2350,7 +2355,7 @@ struct Lara : Character {
             return;
 
         if (!(input & DEATH))
-            checkTrigger();
+            checkTrigger(this, false);
 
     // get turning angle
         float w = (input & LEFT) ? -1.0f : ((input & RIGHT) ? 1.0f : 0.0f);

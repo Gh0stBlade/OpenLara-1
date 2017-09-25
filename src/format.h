@@ -58,7 +58,7 @@
     E( HAMMER_HANDLE         ) \
     E( HAMMER_BLOCK          ) \
     E( LIGHTNING_BALL        ) \
-    E( BARRICADE             ) \
+    E( DOOR_LATCH            ) \
     E( BLOCK_1               ) \
     E( BLOCK_2               ) \
     E( BLOCK_3               ) \
@@ -173,7 +173,7 @@
     E( UNUSED_12             ) \
     E( SMOKE                 ) \
     E( STATUE                ) \
-    E( SHACK                 ) \
+    E( CABIN                 ) \
     E( MUTANT_EGG_SMALL      ) \
     E( RICOCHET              ) \
     E( SPARKLES              ) \

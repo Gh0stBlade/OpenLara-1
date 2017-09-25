@@ -213,6 +213,10 @@ struct Level : IGame {
         this->effectTimer = 0.0f;
     }
 
+    virtual void checkTrigger(Controller *controller, bool heavy) {
+        lara->checkTrigger(controller, heavy);
+    }
+
     virtual bool invUse(TR::Entity::Type type) {
         if (!lara->useItem(type))
             return inventory.use(type);
@@ -419,6 +423,9 @@ struct Level : IGame {
                 case TR::Entity::TRAP_SWORD         :
                     entity.controller = new TrapSword(this, i);
                     break;
+                case TR::Entity::DOOR_LATCH         :
+                    entity.controller = new DoorLatch(this, i);
+                    break;
                 case TR::Entity::SWITCH                :
                 case TR::Entity::SWITCH_WATER          :
                     entity.controller = new Switch(this, i);
@@ -438,6 +445,9 @@ struct Level : IGame {
                     break;
                 case TR::Entity::TRAP_LAVA             :
                     entity.controller = new TrapLava(this, i);
+                    break;
+                case TR::Entity::CABIN                 :
+                    entity.controller = new Cabin(this, i);
                     break;
                 default                                : 
                     if (entity.modelIndex > 0)

@@ -176,6 +176,8 @@ struct TrapBoulder : Controller {
         if (info.roomNext != TR::NO_ROOM)
             getEntity().room = info.roomNext;
 
+        game->checkTrigger(this, true);
+
         vec3 v = pos + getDir() * 512.0f;
         level->getFloorInfo(getRoomIndex(), int(v.x), int(v.y), int(v.z), info);
         if (pos.y > info.floor) {
@@ -267,6 +269,7 @@ struct Block : Controller {
             updateEntity();
             updateFloor(true);
             deactivate();
+            game->checkTrigger(this, true);
         }
         updateLights();
     }
@@ -318,6 +321,7 @@ struct MovingBlock : Controller {
             pos.x = int(pos.x / 1024.0f) * 1024.0f + 512.0f;
             pos.z = int(pos.z / 1024.0f) * 1024.0f + 512.0f;
             updateFloor(true);
+            game->checkTrigger(this, true);
             return;
         }
 
@@ -709,6 +713,54 @@ struct TrapLava : Controller {
     }
 };
 
+
+struct DoorLatch : Controller {
+    enum {
+        STATE_CLOSE,
+        STATE_OPEN,
+    };
+
+    DoorLatch(IGame *game, int entity) : Controller(game, entity) {
+        getEntity().flags.collision = true;
+    }
+
+    virtual void update() {
+        updateAnimation(true);
+        animation.setState(isActive() ? STATE_OPEN : STATE_CLOSE);
+    }
+};
+
+
+struct Cabin : Controller {
+    enum {
+        STATE_UP,
+        STATE_DOWN_1,
+        STATE_DOWN_2,
+        STATE_DOWN_3,
+        STATE_GROUND,
+    };
+
+    Cabin(IGame *game, int entity) : Controller(game, entity) {}
+
+    virtual void update() {
+        TR::Entity &e = getEntity();
+
+        if (e.flags.active == TR::ACTIVE) {
+            if (state >= STATE_UP && state <= STATE_DOWN_2)
+                animation.setState(state + 1);
+            e.flags.active = 0;
+        }
+
+        if (state == STATE_GROUND) {
+            e.flags.invisible        = true;
+            level->flipmap[3].active = TR::ACTIVE;
+            level->isFlipped         = !level->isFlipped;
+            deactivate(true);
+        }
+
+        updateAnimation(true);
+    }
+};
 
 struct KeyHole : Controller {
     KeyHole(IGame *game, int entity) : Controller(game, entity) {}
