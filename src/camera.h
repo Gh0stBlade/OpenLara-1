@@ -31,7 +31,6 @@ struct Camera : ICamera {
     int     room;
 
     float   timer;
-    float   shake;
 
     Basis   prevBasis;
 
@@ -43,11 +42,12 @@ struct Camera : ICamera {
     bool    firstPerson;
     bool    isVR;
 
-    Camera(IGame *game, Character *owner) : ICamera(), game(game), level(game->getLevel()), owner(owner), frustum(new Frustum()), timer(-1.0f), shake(0.0f), viewIndex(-1), viewIndexLast(-1), viewTarget(NULL), isVR(false) {
+    Camera(IGame *game, Character *owner) : ICamera(), game(game), level(game->getLevel()), owner(owner), frustum(new Frustum()), timer(-1.0f), viewIndex(-1), viewIndexLast(-1), viewTarget(NULL), isVR(false) {
         changeView(false);
         if (owner->getEntity().type != TR::Entity::LARA && level->cameraFrames) {
             state = STATE_CUTSCENE;
             room  = level->entities[level->cutEntity].room;
+            timer = 0.0f;
         } else
             state = STATE_FOLLOW;
         destPos  = owner->pos - owner->getDir() * 1024.0f;
@@ -60,7 +60,7 @@ struct Camera : ICamera {
     }
     
     virtual int getRoomIndex() const {
-        return room;
+        return (level->isFlipped && level->rooms[room].alternateRoom > -1) ? level->rooms[room].alternateRoom : room;
     }
 
     virtual void checkRoom() {
@@ -97,6 +97,7 @@ struct Camera : ICamera {
     }
 
     void updateListener() {
+        Sound::flipped = level->isFlipped;
         Sound::listener.matrix = mViewInv;
         TR::Room &r = level->rooms[getRoomIndex()];
         int h = (r.info.yBottom - r.info.yTop) / 1024;
@@ -144,6 +145,14 @@ struct Camera : ICamera {
         target     = viewPoint;
     }
 
+    virtual void doCutscene(const vec3 &pos, float rotation) {
+        state = Camera::STATE_CUTSCENE;
+        level->cutMatrix.identity();
+        level->cutMatrix.rotateY(angle.y);
+        level->cutMatrix.setPos(pos);
+        timer = 0.0f;
+    }
+
     virtual void update() {
         if (shake > 0.0f)
             shake = max(0.0f, shake - Core::deltaTime);
@@ -157,8 +166,11 @@ struct Camera : ICamera {
             if (indexA == level->cameraFramesCount - 1) {
                 if (level->cutEntity != -1)
                     game->loadLevel(TR::LevelID(level->id + 1));
-                else
-                    state = STATE_FOLLOW;
+                else {
+                    Character *lara = (Character*)game->getLara();
+                    if (lara->health > 0.0f)
+                        state = STATE_FOLLOW;
+                }
             }
 
             TR::CameraFrame *frameA = &level->cameraFrames[indexA];

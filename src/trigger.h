@@ -56,13 +56,14 @@ struct Gear : Controller {
     }
 };
 
+#define DART_DAMAGE 50
+
 struct Dart : Controller {
     vec3 velocity;
     vec3 dir;
-    bool inWall;    // dart starts from wall
     bool armed;
 
-    Dart(IGame *game, int entity) : Controller(game, entity), inWall(true), armed(true) {
+    Dart(IGame *game, int entity) : Controller(game, entity), armed(true) {
         dir = vec3(sinf(angle.y), 0, cosf(angle.y));
     }
 
@@ -74,66 +75,141 @@ struct Dart : Controller {
         Controller *lara = (Controller*)level->laraController;
         if (armed && collide(lara)) {
             Sprite::add(game, TR::Entity::BLOOD, getRoomIndex(), (int)pos.x, (int)pos.y, (int)pos.z, Sprite::FRAME_ANIMATED);
-            lara->hit(50.0f, this);
+            lara->hit(DART_DAMAGE, this);
             armed = false;
         }
 
         TR::Level::FloorInfo info;
         level->getFloorInfo(getRoomIndex(), (int)pos.x, (int)pos.y, (int)pos.z, info);
         if (pos.y > info.floor || pos.y < info.ceiling || !insideRoom(pos, getRoomIndex())) {
-            if (!inWall) {
-                TR::Entity &e = getEntity();
+            TR::Entity &e = getEntity();
                 
-                vec3 p = pos - dir * 64.0f; // wall offset = 64
-                Sprite::add(game, TR::Entity::RICOCHET, e.room, (int)p.x, (int)p.y, (int)p.z, Sprite::FRAME_RANDOM);
+            vec3 p = pos - dir * 64.0f; // wall offset = 64
+            Sprite::add(game, TR::Entity::RICOCHET, e.room, (int)p.x, (int)p.y, (int)p.z, Sprite::FRAME_RANDOM);
 
-                level->entityRemove(entity);
-                delete this;
-            }
-        } else
-            inWall = false;
+            level->entityRemove(entity);
+            delete this;
+        }
     }
 };
 
-struct TrapDartgun : Controller {
+struct TrapDartEmitter : Controller {
     enum {
         STATE_IDLE,
         STATE_FIRE
     };
 
-    TrapDartgun(IGame *game, int entity) : Controller(game, entity) {}
+    TrapDartEmitter(IGame *game, int entity) : Controller(game, entity) {}
     
-    virtual bool activate() {
-        if (!Controller::activate())
-            return false;
-        
-        animation.setState(STATE_FIRE);
+    void virtual update() {
+        if (state == STATE_IDLE || state == STATE_FIRE)
+            animation.setState(isActive() ? STATE_FIRE : STATE_IDLE);
+        else
+            ASSERT(false);
 
-        // add dart (bullet)
-        TR::Entity &entity = getEntity();
+        if (state == STATE_FIRE && animation.framePrev == -1) {
+            TR::Entity &entity = getEntity();
 
-        vec3 p = pos + vec3(0.0f, -512.0f, 256.0f).rotateY(PI - entity.rotation);
+            vec3 p = pos + vec3(0.0f, -512.0f, 256.0f).rotateY(PI - entity.rotation);
 
-        int dartIndex = level->entityAdd(TR::Entity::TRAP_DART, entity.room, (int)p.x, (int)p.y, (int)p.z, entity.rotation, entity.intensity);
-        if (dartIndex > -1) {
-            Dart *dart = new Dart(game, dartIndex);
-            dart->activate();
-            level->entities[dartIndex].controller = dart; 
+            int index = level->entityAdd(TR::Entity::TRAP_DART, getRoomIndex(), int(p.x), int(p.y), int(p.z), entity.rotation, -1);
+            if (index > -1) {
+                Dart *dart = new Dart(game, index);
+                dart->activate();
+                level->entities[index].controller = dart; 
+            }
+
+            Sprite::add(game, TR::Entity::SMOKE, entity.room, (int)p.x, (int)p.y, (int)p.z);
+
+            game->playSound(TR::SND_DART, p, Sound::Flags::PAN);
         }
 
-        Sprite::add(game, TR::Entity::SMOKE, entity.room, (int)p.x, (int)p.y, (int)p.z);
+        updateAnimation(true);
+    }
+};
 
-        playSound(TR::SND_DART, pos, Sound::Flags::PAN);
+#define FLAME_HEAT_DAMAGE 90
+#define FLAME_BURN_DAMAGE 150
 
-        return true;
+struct Flame : Sprite {
+
+    static Flame* add(IGame *game, Controller *controller, int jointIndex) {
+        Flame *flame = NULL;
+
+        TR::Level *level = game->getLevel();
+        int  roomIndex   = controller->getRoomIndex();
+        vec3 pos         = controller->pos;
+
+        int index = level->entityAdd(TR::Entity::TRAP_FLAME, roomIndex, int(pos.x), int(pos.y), int(pos.z), 0, 0);
+        if (index > -1) {
+            flame = new Flame(game, index, jointIndex);
+            level->entities[index].controller = flame; 
+        }
+        return flame;
     }
 
+    int jointIndex;
+    float sleep;
+
+    Flame(IGame *game, int entity, int jointIndex) : Sprite(game, entity, false, Sprite::FRAME_ANIMATED), jointIndex(jointIndex), sleep(0.0f) {
+        time = randf() * 3.0f;
+        activate();
+    }
+
+    virtual void update() {
+        Sprite::update();
+        game->playSound(TR::SND_FLAME, pos, Sound::PAN);
+
+        Character *lara = (Character*)level->laraController;
+
+        if (jointIndex > -1) {
+            if (lara->stand == Character::STAND_UNDERWATER) {
+                level->entityRemove(entity);
+                delete this;
+                return;
+            }
+
+            pos = lara->animation.getJoints(lara->getMatrix(), jointIndex).pos;
+            if (jointIndex == 0)
+                pos.y += 100.0f;
+
+            lara->hit(FLAME_BURN_DAMAGE * Core::deltaTime, this);
+        } else 
+            if (lara->health > 0.0f) {
+                if (sleep > 0.0f)
+                    sleep = max(0.0f, sleep - Core::deltaTime);
+
+                if (sleep == 0.0f && lara->collide(Sphere(pos, 600.0f))) {
+                    lara->hit(FLAME_HEAT_DAMAGE * Core::deltaTime, this);
+
+                    if (lara->collide(Sphere(pos, 300.0f))) {
+                        Flame::add(game, lara, 0);
+                        sleep = 3.0f; // stay inactive for 3 seconds
+                    }
+                }
+            }
+    }
+};
+
+struct TrapFlameEmitter : Controller {
+    Flame *flame;
+
+    TrapFlameEmitter(IGame *game, int entity) : Controller(game, entity), flame(NULL) {}
+
     void virtual update() {
-        updateAnimation(true);
-        if (animation.canSetState(STATE_IDLE)) {
-            animation.setState(STATE_IDLE);
-            deactivate();
+        if (!isActive()) {
+            if (flame) {
+                level->entityRemove(flame->entity);
+                delete flame;
+                flame = NULL;
+                Sound::stop(TR::SND_FLAME);
+            }
+            return;
         }
+
+        if (flame) return;
+
+        flame = Flame::add(game, this, -1);
     }
 };
 
@@ -207,7 +283,9 @@ struct Block : Controller {
         STATE_PULL,
     };
 
-    Block(IGame *game, int entity) : Controller(game, entity) {
+    float velocity;
+
+    Block(IGame *game, int entity) : Controller(game, entity), velocity(0.0f) {
         updateFloor(true);
     }
 
@@ -263,13 +341,34 @@ struct Block : Controller {
     }
 
     virtual void update() {
-        if (state == STATE_STAND) return;
-        updateAnimation(true);
-        if (state == STATE_STAND) {
+        TR::Entity &e = getEntity();
+        TR::Level::FloorInfo info;        
+        level->getFloorInfo(e.room, e.x, e.y, e.z, info);
+
+        if (pos.y < info.floor) {
+            if (info.roomBelow != TR::NO_ROOM)
+                e.room = info.roomBelow;
+
+            velocity += Core::deltaTime * GRAVITY;
+            pos.y    += Core::deltaTime * velocity * 30.0f;
+            if (pos.y >= info.floor) {
+                velocity = 0.0f;
+                pos.y    = float(info.floor);
+                game->setEffect(this, TR::Effect::FLOOR_SHAKE);
+                game->playSound(TR::SND_BOULDER, pos, Sound::PAN);
+                deactivate(true);
+                updateFloor(true);
+            }
             updateEntity();
-            updateFloor(true);
-            deactivate();
-            game->checkTrigger(this, true);
+        } else {
+            if (state == STATE_STAND) return;
+            updateAnimation(true);
+            if (state == STATE_STAND) {
+                updateEntity();
+                updateFloor(true);
+                deactivate();
+                game->checkTrigger(this, true);
+            }
         }
         updateLights();
     }
@@ -522,7 +621,7 @@ struct Crystal : Controller {
     Texture *environment;
 
     Crystal(IGame *game, int entity) : Controller(game, entity) {
-        environment = new Texture(64, 64, Texture::RGBA, true);
+        environment = new Texture(64, 64, Texture::RGBA, true, NULL, true, true);
         activate();
     }
 
@@ -535,8 +634,7 @@ struct Crystal : Controller {
     }
 
     virtual void render(Frustum *frustum, MeshBuilder *mesh, Shader::Type type, bool caustics) {
-        Shader *sh = Core::active.shader;
-        sh->setParam(uMaterial, vec4(1.0f));
+        Core::active.shader->setParam(uMaterial, vec4(0.5, 0.5, 2.0, 1.0f)); // blue color dodge for crystal
         environment->bind(sEnvironment);
         Controller::render(frustum, mesh, type, caustics);
     }
@@ -676,15 +774,287 @@ struct TrapSlam : Controller {
     }
 };
 
+#define SWORD_DAMAGE 100.0f
+#define SWORD_RANGE  1536.0f
 
 struct TrapSword : Controller {
-    TrapSword(IGame *game, int entity) : Controller(game, entity) {}
+    vec3  dir;
+    float rot;
+
+    TrapSword(IGame *game, int entity) : Controller(game, entity), dir(0) {
+        rot = (randf() * 2.0f - 1.0f) * PI;
+    }
 
     virtual void update() {
-        updateAnimation(true);
+        TR::Level::FloorInfo info;
+        level->getFloorInfo(getRoomIndex(), int(pos.x), int(pos.y), int(pos.z), info);
+
+        Controller *lara = game->getLara();
+
+        if (dir.y == 0.0f) {
+            dir = lara->pos - pos;
+            if (dir.y > 0 && dir.y < 3072.0f && fabsf(dir.x) < SWORD_RANGE && fabsf(dir.z) < SWORD_RANGE) {
+                dir /= 32.0f;
+                dir.y = 50.0f;
+            } else
+                dir.y = 0.0f;
+        } else {
+            angle.y += rot * Core::deltaTime;
+            applyGravity(dir.y);
+            pos += dir * (30.0f * Core::deltaTime);
+            if (pos.y > float(info.floor)) {
+                pos.y = float(info.floor);
+                game->playSound(TR::SND_SWORD, pos, Sound::PAN);
+                deactivate(true);
+            }
+            updateEntity();
+
+            if (collide(lara))
+                lara->hit(SWORD_DAMAGE * 30.0f * Core::deltaTime, this, TR::HIT_SWORD); // TODO: push lara
+        }
     }
 };
 
+
+struct ThorHammer : Controller {
+    enum {
+        STATE_IDLE,
+        STATE_START,
+        STATE_FALL,
+        STATE_DOWN,
+    };
+
+    Controller *block;
+
+    ThorHammer(IGame *game, int entity) : Controller(game, entity) {
+        TR::Entity &e = getEntity();
+        int index = level->entityAdd(TR::Entity::HAMMER_BLOCK, getRoomIndex(), e.x, e.y, e.z, e.rotation, -1);
+        if (index > -1) {
+            block = new Controller(game, index);
+            level->entities[index].controller = block;
+        }
+        e.flags.collision = block->getEntity().flags.collision = false;
+    }
+
+    virtual void update() {
+        Character *lara = (Character*)game->getLara();
+
+        switch (state) {
+            case STATE_IDLE  : if (isActive()) animation.setState(STATE_START); break;
+            case STATE_START : animation.setState(isActive() ? STATE_FALL : STATE_IDLE); break;
+            case STATE_FALL  : {
+                if (animation.frameIndex > 30 && lara->health > 0.0f) {
+                    vec3 d = pos + getDir() * (3.0f * 1024.0f) - lara->pos;
+                    if (fabsf(d.x) < 520.0f && fabsf(d.z) < 520.0f)
+                        lara->hit(1001, this, TR::HIT_BOULDER);
+                }
+                break;
+            }
+            case STATE_DOWN : {
+                game->checkTrigger(this, 1); 
+                if (lara->health > 0.0f)
+                    getEntity().flags.collision = block->getEntity().flags.collision = true;
+                deactivate(true);
+                break;
+            }
+        }
+
+        updateAnimation(true);
+        block->animation.frameA = animation.frameA;
+        block->animation.frameB = animation.frameB;
+        block->animation.delta  = animation.delta;
+    }
+};
+
+
+#define LIGHTNING_DAMAGE 400
+
+struct Lightning : Controller {
+    vec3  target;
+    float timer;
+    bool  flash;
+    bool  armed;
+
+    Lightning(IGame *game, int entity) : Controller(game, entity), timer(0), flash(false) {}
+
+    virtual void update() {
+        if (isActive()) {
+            timer -= Core::deltaTime;
+
+            Character *lara = (Character*)level->laraController;
+
+            if (timer <= 0.0f) {
+                if (flash) {
+                    level->isFlipped = false;
+                    flash = false;
+                    armed = true;
+                    timer = (35.0f + randf() * 45.0f) / 30.0f;                    
+                } else {
+                    level->isFlipped = true;
+                    flash = true;
+                    timer = 20.0f / 30.0f;
+
+                    bool hasTargets = getModel()->mCount > 1; // LEVEL4 has, LEVEL10C not
+
+                    if ((lara->pos - pos).length() < (hasTargets ? 2560.0f : 1024.0f)) {
+                        lara->hit(LIGHTNING_DAMAGE, this, TR::HIT_LIGHTNING);
+                        armed = false;
+                    } else if (!hasTargets) {
+                        target = pos + vec3(0.0f, 1024.0f, 0.0f);
+                    } else
+                        target = animation.getJoints(getMatrix(), 1 + int(randf() * 5)).pos;
+                }
+                game->playSound(TR::SND_LIGHTNING, pos, Sound::PAN);
+            }
+        } else {
+            timer = 0.0f;
+            flash = false;
+            level->isFlipped = false;
+            deactivate(true);
+        }
+    }
+
+    void divide(vec3 *points, int L, int R, float spread) {
+        int M = (L + R) / 2;
+        if (M == L || M == R) return;
+        points[M] = (points[L] + points[R]) * 0.5f + (vec3(randf(), randf(), randf()) - 0.5f) * spread;
+        spread *= 0.5f;
+        divide(points, L, M, spread);
+        divide(points, M, R, spread);
+    }
+
+    short4 toCoord(const vec3 &v, int16 joint) {
+        return short4(int16(v.x), int16(v.y), int16(v.z), joint);
+    }
+
+    void setVertex(Vertex &v, const vec3 &coord, int16 joint, int idx) {
+        v.coord     = toCoord(coord, joint);
+        v.normal    = { 0, -1, 0, 0 };
+        v.texCoord  = { barTile[0].texCoord[idx].x, barTile[0].texCoord[idx].y, 32767, 32767 };
+        v.param     = { 0, 0, 0, 0 };
+        v.color     = { 255, 255, 255, 255 };
+    }
+
+    void renderPolyline(const vec3 &start, const vec3 &end, float width, float spread, int depth) {
+        vec3 points[9];
+        points[0] = start;
+        points[8] = end;
+        divide(points, 0, 8, spread);
+
+        Index  indices[(COUNT(points) - 1) * 6];
+        Vertex vertices[COUNT(points) * 2];
+        
+        int iCount = 0;
+        int vCount = 0;
+        int count = COUNT(points);
+    // build indices
+        for (int i = 0; i < count - 1; i++) {
+            indices[iCount++] = vCount;
+            indices[iCount++] = vCount + 1;
+            indices[iCount++] = vCount + 2;
+            indices[iCount++] = vCount + 1;
+            indices[iCount++] = vCount + 3;
+            indices[iCount++] = vCount + 2;
+            vCount += 2;
+        }
+        vCount += 2;
+        ASSERT(iCount == (count - 1) * 6);
+        ASSERT(vCount == count * 2);
+
+    // build vertices
+        vec3 dir = Core::mViewInv.dir.xyz;
+
+        vCount = 0;
+        vec3 n;
+        for (int i = 0; i < count; i++) {
+            if (i < count - 1)
+                n = dir.cross(points[i + 1] - points[i]).normal() * width;
+            setVertex(vertices[vCount++], points[i] - n, 0, 0);
+            setVertex(vertices[vCount++], points[i] + n, 0, 3);
+        }
+        ASSERT(vCount == count * 2);
+
+        game->getMesh()->renderBuffer(indices, iCount, vertices, vCount);
+
+        if (depth > 0) {
+            for (int i = 0; i < 2; i++) {
+                vec3 a = points[int(randf() * (count - 1))];
+                vec3 b = a;
+                b.x += (randf() - 0.5f) * spread;
+                b.y  = points[count - 1].y;
+                b.z += (randf() - 0.5f) * spread;
+
+                renderPolyline(a, b, width * 0.75f, spread * 0.5f, depth - 1);
+            }
+        }
+    }
+
+
+    virtual void render(Frustum *frustum, MeshBuilder *mesh, Shader::Type type, bool caustics) {
+        Controller::render(frustum, mesh, type, caustics);
+        if (!flash) return;
+
+        if (!armed)
+            target = game->getLara()->pos;
+
+        Basis b = animation.getJoints(getMatrix(), 0);
+        b.rot = quat(0, 0, 0, 1);
+
+        game->setShader(Core::pass, Shader::FLASH, false, false);
+        Core::active.shader->setParam(uMaterial, vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        Core::active.shader->setParam(uBasis, b);
+
+        Core::setCulling(cfNone);
+        Core::setBlending(bmAdd);
+        Core::setDepthWrite(false);
+
+        renderPolyline(vec3(0.0f), target - b.pos, 64.0f, 512.0f, 1);
+
+        Core::setDepthWrite(true);
+        Core::setBlending(bmNone);
+        Core::setCulling(cfFront);
+    }
+};
+
+struct MidasHand : Controller {
+    TR::Entity::Type invItem;
+    bool interaction;
+
+    MidasHand(IGame *game, int entity) : Controller(game, entity), invItem(TR::Entity::NONE), interaction(false) {
+        activate();
+    }
+
+    virtual void update() {
+        Character *lara = (Character*)level->laraController;
+        
+        if (lara->health <= 0.0f || lara->stand != Character::STAND_GROUND || lara->getRoomIndex() != getRoomIndex())
+            return;
+
+        vec3 d = (pos - lara->pos).abs();
+
+        if (d.x < 512.0f && d.z < 512.0f) { // check for same sector
+            lara->hit(1001.0f, this, TR::HIT_MIDAS);
+            deactivate(true);
+            return;
+        }
+
+        interaction = (d.x < 700.0f && d.z < 700.0f) && lara->state == 2; // 2 = Lara::STATE_STOP
+
+        if (interaction) {
+            if (invItem != TR::Entity::NONE) {
+                if (invItem == TR::Entity::INV_LEADBAR) {
+                    lara->angle.y = PI * 0.5f;
+                    lara->pos.x   = pos.x - 612.0f;
+                    lara->animation.setAnim(level->models[TR::MODEL_LARA_SPEC].animation);
+                    game->invAdd(TR::Entity::PUZZLE_1);
+                } else
+                    game->playSound(TR::SND_NO, pos, Sound::PAN); // uncompatible item
+                invItem = TR::Entity::NONE;
+            } else if (Input::state[cAction] && !game->invChooseKey(getEntity().type)) // TODO: add callback for useItem
+                game->playSound(TR::SND_NO, pos, Sound::PAN); // no compatible items in inventory
+        }
+    }
+};
 
 struct TrapLava : Controller {
     bool done;
@@ -694,7 +1064,7 @@ struct TrapLava : Controller {
     virtual void update() {
         Character *lara = (Character*)level->laraController;
         if (lara->health > 0.0f && collide(lara))
-            lara->hit(1000.0f, this, TR::HIT_FLAME);
+            lara->hit(1001.0f, this, TR::HIT_LAVA);
 
         if (done) {
             deactivate();
@@ -731,6 +1101,33 @@ struct DoorLatch : Controller {
 };
 
 
+#define CENTAUR_STATUE_RANGE (3072 + 512)
+
+struct CentaurStatue : Controller {
+
+    CentaurStatue(IGame *game, int entity) : Controller(game, entity) {}
+
+    virtual void update() {
+        if (explodeMask) {
+            Controller::update();
+            if (!explodeMask)
+                deactivate(true);
+            return;
+        }
+
+        if ((pos - game->getLara()->pos).length() < CENTAUR_STATUE_RANGE) {
+            explode(0xFFFFFFFF);
+            game->playSound(TR::SND_EXPLOSION, pos, Sound::PAN);
+            int index = game->addEntity(TR::Entity::ENEMY_CENTAUR, getRoomIndex(), pos, angle.y);
+            if (index > -1) {
+                Controller *controller = (Controller*)level->entities[index].controller;
+                controller->animation.setAnim(7, -36);
+            }
+        }
+    }
+};
+
+
 struct Cabin : Controller {
     enum {
         STATE_UP,
@@ -762,6 +1159,67 @@ struct Cabin : Controller {
     }
 };
 
+
+struct Boat : Controller {
+    enum {
+        STATE_IDLE = 1,
+        STATE_MOVE,
+        STATE_STOP,
+    };
+
+    Boat(IGame *game, int entity) : Controller(game, entity) {}
+
+    virtual void update() {
+        switch (state) {
+            case STATE_IDLE : animation.setState(STATE_MOVE); break;
+            case STATE_MOVE : animation.setState(STATE_STOP); break;
+            case STATE_STOP : deactivate(true); getEntity().flags.invisible = true; break;
+        }
+        updateAnimation(true);
+        pos = pos + getDir() * (animation.getSpeed() * Core::deltaTime * 30.0f);
+    }
+};
+
+
+#define MUTANT_EGG_RANGE 4096
+
+struct MutantEgg : Controller {
+    enum {
+        STATE_IDLE,
+        STATE_EXPLOSION,
+    };
+
+    TR::Entity::Type enemy;
+    
+    MutantEgg(IGame *game, int entity) : Controller(game, entity) {
+        initMeshOverrides();
+        layers[0].mask = 0xff0001ff; // hide dynamic meshes
+
+        switch (getEntity().flags.active) {
+            case 1  : enemy = TR::Entity::ENEMY_MUTANT_2;     break;
+            case 2  : enemy = TR::Entity::ENEMY_CENTAUR;      break;
+            case 4  : enemy = TR::Entity::ENEMY_GIANT_MUTANT; break;
+            case 8  : enemy = TR::Entity::ENEMY_MUTANT_3;     break;
+            default : enemy = TR::Entity::ENEMY_MUTANT_1;
+        }
+    }
+
+    virtual void update() {
+        if (state != STATE_EXPLOSION) {
+            Box box = Box(pos + vec3(-MUTANT_EGG_RANGE), pos + vec3(MUTANT_EGG_RANGE));
+            TR::Entity &e = getEntity();
+            if ( e.flags.once || e.type == TR::Entity::MUTANT_EGG_BIG || box.contains((((Controller*)level->laraController)->pos)) ) {
+                animation.setState(STATE_EXPLOSION);
+                layers[0].mask = 0xffffffff & ~(1 << 24);
+                explode(0x00fffe00);
+                game->addEntity(enemy, getRoomIndex(), pos, angle.y);
+            }
+        }
+        Controller::update();
+    }
+};
+
+
 struct KeyHole : Controller {
     KeyHole(IGame *game, int entity) : Controller(game, entity) {}
 
@@ -777,6 +1235,33 @@ struct KeyHole : Controller {
     }
 
     virtual void update() {}
+};
+
+
+struct Earthquake : Controller {
+    float timer;
+
+    Earthquake(IGame *game, int entity) : Controller(game, entity), timer(0.0f) {}
+
+    virtual void update() {
+        if (!isActive()) return;
+
+        if (timer < (1.0f / 30.0f)){
+            timer += Core::deltaTime;
+            return;
+        }
+
+        float p = randf();
+        if (p < 0.001f) {
+            game->playSound(TR::SND_STOMP);
+            game->getCamera()->shake = 1.0f;
+        } else if (p < 0.04f) {
+            game->playSound(TR::SND_BOULDER);
+            game->getCamera()->shake = 0.3f;
+        }
+
+        timer = 0.0f;
+    }
 };
 
 

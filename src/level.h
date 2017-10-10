@@ -50,7 +50,7 @@ struct Level : IGame {
 
     TR::Effect effect;
     float      effectTimer;
-    int        flickerIdx;
+    int        effectIdx;
 
 // IGame implementation ========
     virtual void loadLevel(TR::LevelID id) {
@@ -67,6 +67,10 @@ struct Level : IGame {
             case TR::VER_TR1_PSX : strcat(buf, ".PSX"); break;
         }
         new Stream(buf, loadAsync);
+    }
+
+    virtual void loadNextLevel() {
+        loadLevel(level.id == TR::LEVEL_10C ? TR::TITLE : TR::LevelID(level.id + 1));
     }
 
     virtual void loadGame(int slot) {
@@ -163,6 +167,34 @@ struct Level : IGame {
         shaderCache->bind(pass, type, (underwater ? ShaderCache::FX_UNDERWATER : 0) | (alphaTest ? ShaderCache::FX_ALPHA_TEST : 0) | ((params->clipHeight != NO_CLIP_PLANE && pass == Core::passCompose) ? ShaderCache::FX_CLIP_PLANE : 0), this);
     }
 
+    virtual void setRoomParams(int roomIndex, Shader::Type type, float diffuse, float ambient, float specular, float alpha, bool alphaTest = false) {
+        if (Core::pass == Core::passShadow) {
+            setShader(Core::pass, type);
+            return;
+        }
+
+        TR::Room &room = level.rooms[roomIndex];
+
+        if (room.flags.water)
+            setWaterParams(float(room.info.yTop));
+        else
+            setWaterParams(NO_CLIP_PLANE);
+
+        setShader(Core::pass, type, room.flags.water, alphaTest);
+
+        if (room.flags.water) {
+            if (waterCache)
+                waterCache->bindCaustics(roomIndex);
+            setWaterParams(float(room.info.yTop));
+        }
+
+        Core::active.shader->setParam(uParam, Core::params);
+        Core::active.shader->setParam(uMaterial, vec4(diffuse, ambient, specular, alpha));
+
+        if (Core::settings.detail.shadows > Core::Settings::MEDIUM)
+            Core::active.shader->setParam(uContacts, Core::contacts[0], MAX_CONTACTS);
+    }
+
     virtual void setupBinding() {
         atlas->bind(sDiffuse);
         Core::whiteTex->bind(sNormal);
@@ -187,34 +219,54 @@ struct Level : IGame {
         }
     }
     
-    virtual void setEffect(TR::Effect effect, float param) {
-        if (effect == TR::Effect::NONE)
-            return;
-
-        if (effect == TR::Effect::FLOOR_SHAKE) {
-            camera->shake = param;
-            return;
-        }
-
-        if (effect == TR::Effect::FLICKER)
-            flickerIdx = 0;
-
-        if (effect == TR::Effect::FLOOD) {
-            Sound::Sample *sample = playSound(TR::SND_FLOOD, vec3(), 0);
-            if (sample)
-                sample->setVolume(0.0f, 4.0f);
-        }
-
-        if (effect == TR::Effect::STAIRS2SLOPE) {
-            playSound(TR::SND_EFFECT_8, vec3(), 0);
-        }
-
+    virtual void setEffect(Controller *controller, TR::Effect effect) {
         this->effect      = effect;
         this->effectTimer = 0.0f;
+        this->effectIdx   = 0;
+
+        switch (effect) {
+            case TR::Effect::FLOOR_SHAKE :
+                camera->shake = 0.5f * max(0.0f, 1.0f - (controller->pos - camera->pos).length2() / (15 * 1024 * 15 * 1024));
+                return;
+            case TR::Effect::FLOOD : {
+                Sound::Sample *sample = playSound(TR::SND_FLOOD, vec3(), 0);
+                if (sample)
+                    sample->setVolume(0.0f, 4.0f);
+                break;
+            }
+            case TR::Effect::STAIRS2SLOPE :
+                playSound(TR::SND_STAIRS2SLOPE, vec3(), 0);
+                break;
+            case TR::Effect::EXPLOSION :
+                playSound(TR::SND_TNT, vec3(0), 0);
+                camera->shake = 1.0f;
+                break;
+            default : ;
+        }
     }
 
     virtual void checkTrigger(Controller *controller, bool heavy) {
         lara->checkTrigger(controller, heavy);
+    }
+
+    virtual int addSprite(TR::Entity::Type type, int room, int x, int y, int z, int frame = -1, bool empty = false) {
+        return Sprite::add(this, type, room, x, y, z, frame, empty);
+    }
+
+    virtual int addEntity(TR::Entity::Type type, int room, const vec3 &pos, float angle) {
+        int index = level.entityAdd(type, room, int(pos.x), int(pos.y), int(pos.z), TR::angle(angle), -1);
+        if (index > -1) {
+            TR::Entity &e = level.entities[index];
+            Controller *controller = initController(index);
+            e.controller = controller;
+            if (e.isEnemy()) {
+                e.flags.active = TR::ACTIVE;
+                controller->activate();
+            }
+            if (e.isPickup())
+                e.intensity = 4096;
+        }
+        return index;
     }
 
     virtual bool invUse(TR::Entity::Type type) {
@@ -235,7 +287,7 @@ struct Level : IGame {
         return inventory.chooseKey(hole);
     }
 
-    virtual Sound::Sample* playSound(int id, const vec3 &pos, int flags, int group = -1) const {
+    virtual Sound::Sample* playSound(int id, const vec3 &pos = vec3(0.0f), int flags = 0) const {
         if (level.version == TR::VER_TR1_PSX && id == TR::SND_SECRET)
             return NULL;
 
@@ -246,13 +298,17 @@ struct Level : IGame {
         if (b.chance == 0 || (rand() & 0x7fff) <= b.chance) {
             int   index  = b.offset + rand() % b.flags.count;
             float volume = (float)b.volume / 0x7FFF;
-            float pitch  = b.flags.pitch ? (0.9f + randf() * 0.2f) : 1.0f; 
-            if (b.flags.mode == 1) flags |= Sound::UNIQUE;
-            //if (b.flags.mode == 2) flags |= Sound::REPLAY;
-            if (b.flags.mode == 3) flags |= Sound::SYNC;
+            float pitch  = b.flags.pitch ? (0.9f + randf() * 0.2f) : 1.0f;
+            if (!(flags & Sound::MUSIC)) {
+                switch (b.flags.mode) {
+                    case 0 : flags |= Sound::UNIQUE; break;
+                    case 1 : flags |= Sound::REPLAY; break;
+                    case 2 : flags |= Sound::FLIPPED | Sound::UNFLIPPED | Sound::LOOP; break;
+                }
+            }
             if (b.flags.gain) volume = max(0.0f, volume - randf() * 0.25f);
-            if (b.flags.fixed) flags |= Sound::LOOP;
-            return Sound::play(level.getSampleStream(index), pos, volume, pitch, flags, group * 1000 + index);
+            //if (b.flags.camera) flags &= ~Sound::PAN;
+            return Sound::play(level.getSampleStream(index), pos, volume, pitch, flags, id);
         }
         return NULL;
     }
@@ -288,14 +344,14 @@ struct Level : IGame {
         }
         curTrack = track;
 
-        if (track == 0) return;
-
         if (sndSoundtrack) {
             sndSoundtrack->setVolume(-1.0f, 0.2f);
             if (sndCurrent == sndSoundtrack)
                 sndCurrent = NULL;
             sndSoundtrack = NULL;
         }
+
+        if (track <= 0) return;
 
         char title[32];
         sprintf(title, "audio/track_%02d.ogg", track);
@@ -304,7 +360,7 @@ struct Level : IGame {
     }
 
     virtual void stopTrack() {
-        playTrack(0);
+        playTrack(-1);
     }
 //==============================
 
@@ -321,140 +377,10 @@ struct Level : IGame {
         initOverrides();
 
         for (int i = 0; i < level.entitiesBaseCount; i++) {
-            TR::Entity &entity = level.entities[i];
-            switch (entity.type) {
-                case TR::Entity::LARA                  : 
-                case TR::Entity::CUT_1                 :
-                    entity.controller = (lara = new Lara(this, i));
-                    break;
-                case TR::Entity::ENEMY_WOLF            :   
-                    entity.controller = new Wolf(this, i);
-                    break;
-                case TR::Entity::ENEMY_BEAR            : 
-                    entity.controller = new Bear(this, i);
-                    break;
-                case TR::Entity::ENEMY_BAT             :   
-                    entity.controller = new Bat(this, i);
-                    break;
-                case TR::Entity::ENEMY_TWIN            :
-                case TR::Entity::ENEMY_CROCODILE_LAND  :
-                case TR::Entity::ENEMY_CROCODILE_WATER :
-                case TR::Entity::ENEMY_LION_MALE       :
-                case TR::Entity::ENEMY_LION_FEMALE     :
-                case TR::Entity::ENEMY_PUMA            :
-                case TR::Entity::ENEMY_GORILLA         :
-                case TR::Entity::ENEMY_RAT_LAND        :
-                case TR::Entity::ENEMY_RAT_WATER       :
-                case TR::Entity::ENEMY_REX             :
-                    entity.controller = new Rex(this, i);
-                    break;
-                case TR::Entity::ENEMY_RAPTOR          :
-                    entity.controller = new Raptor(this, i);
-                    break;
-                case TR::Entity::ENEMY_MUTANT_1        :
-                case TR::Entity::ENEMY_MUTANT_2        :
-                case TR::Entity::ENEMY_MUTANT_3        :
-                case TR::Entity::ENEMY_CENTAUR         :
-                case TR::Entity::ENEMY_MUMMY           :
-                case TR::Entity::ENEMY_LARSON          :
-                    entity.controller = new Enemy(this, i, 100, 10, 0.0f, 0.0f);
-                    break;
-                case TR::Entity::DOOR_1                :
-                case TR::Entity::DOOR_2                :
-                case TR::Entity::DOOR_3                :
-                case TR::Entity::DOOR_4                :
-                case TR::Entity::DOOR_5                :
-                case TR::Entity::DOOR_6                :
-                case TR::Entity::DOOR_BIG_1            :
-                case TR::Entity::DOOR_BIG_2            :
-                    entity.controller = new Door(this, i);
-                    break;
-                case TR::Entity::TRAP_DOOR_1           :
-                case TR::Entity::TRAP_DOOR_2           :
-                    entity.controller = new TrapDoor(this, i);
-                    break;
-                case TR::Entity::BRIDGE_0              :
-                case TR::Entity::BRIDGE_1              :
-                case TR::Entity::BRIDGE_2              :
-                    entity.controller = new Bridge(this, i);
-                    break;
-                case TR::Entity::GEARS_1               :
-                case TR::Entity::GEARS_2               :
-                case TR::Entity::GEARS_3               :
-                    entity.controller = new Gear(this, i);
-                    break;
-                case TR::Entity::TRAP_FLOOR            :
-                    entity.controller = new TrapFloor(this, i);
-                    break;
-                case TR::Entity::CRYSTAL               :
-                    entity.controller = new Crystal(this, i);
-                    break;
-                case TR::Entity::TRAP_BLADE            :
-                    entity.controller = new TrapBlade(this, i);
-                    break;
-                case TR::Entity::TRAP_SPIKES           :
-                    entity.controller = new TrapSpikes(this, i);
-                    break;
-                case TR::Entity::TRAP_BOULDER          :
-                    entity.controller = new TrapBoulder(this, i);
-                    break;
-                case TR::Entity::TRAP_DARTGUN          :
-                    entity.controller = new TrapDartgun(this, i);
-                    break;
-                case TR::Entity::DRAWBRIDGE            :
-                    entity.controller = new Drawbridge(this, i);
-                    break;
-                case TR::Entity::BLOCK_1               :
-                case TR::Entity::BLOCK_2               :
-                case TR::Entity::BLOCK_3               :
-                case TR::Entity::BLOCK_4               :
-                    entity.controller = new Block(this, i);
-                    break;                     
-                case TR::Entity::MOVING_BLOCK          :
-                    entity.controller = new MovingBlock(this, i);
-                    break;
-                case TR::Entity::TRAP_CEILING_1     :
-                case TR::Entity::TRAP_CEILING_2     :
-                    entity.controller = new TrapCeiling(this, i);
-                    break;
-                case TR::Entity::TRAP_SLAM          :
-                    entity.controller = new TrapSlam(this, i);
-                    break;
-                case TR::Entity::TRAP_SWORD         :
-                    entity.controller = new TrapSword(this, i);
-                    break;
-                case TR::Entity::DOOR_LATCH         :
-                    entity.controller = new DoorLatch(this, i);
-                    break;
-                case TR::Entity::SWITCH                :
-                case TR::Entity::SWITCH_WATER          :
-                    entity.controller = new Switch(this, i);
-                    break;
-                case TR::Entity::PUZZLE_HOLE_1         :
-                case TR::Entity::PUZZLE_HOLE_2         :
-                case TR::Entity::PUZZLE_HOLE_3         :
-                case TR::Entity::PUZZLE_HOLE_4         :
-                case TR::Entity::KEY_HOLE_1            :
-                case TR::Entity::KEY_HOLE_2            :
-                case TR::Entity::KEY_HOLE_3            :
-                case TR::Entity::KEY_HOLE_4            :
-                    entity.controller = new KeyHole(this, i);
-                    break;
-                case TR::Entity::WATERFALL             :
-                    entity.controller = new Waterfall(this, i);
-                    break;
-                case TR::Entity::TRAP_LAVA             :
-                    entity.controller = new TrapLava(this, i);
-                    break;
-                case TR::Entity::CABIN                 :
-                    entity.controller = new Cabin(this, i);
-                    break;
-                default                                : 
-                    if (entity.modelIndex > 0)
-                        entity.controller = new Controller(this, i);
-                    else
-                        entity.controller = new Sprite(this, i, 0);
-            }
+            TR::Entity &e = level.entities[i];
+            e.controller = initController(i);
+            if (e.type == TR::Entity::LARA || e.type == TR::Entity::CUT_1)
+                lara = (Lara*)e.controller;
         }
 
         if (level.id != TR::TITLE) {
@@ -474,13 +400,13 @@ struct Level : IGame {
         // init sounds
             //sndSoundtrack = Sound::play(Sound::openWAD("05_Lara's_Themes.wav"), vec3(0.0f), 1, 1, Sound::Flags::LOOP);
 
-            sndUnderwater = lara->playSound(TR::SND_UNDERWATER, vec3(0.0f), Sound::LOOP | Sound::MUSIC);
+            sndUnderwater = playSound(TR::SND_UNDERWATER, vec3(0.0f), Sound::LOOP | Sound::MUSIC);
             if (sndUnderwater)
                 sndUnderwater->volume = sndUnderwater->volumeTarget = 0.0f;
 
             for (int i = 0; i < level.soundSourcesCount; i++) {
                 TR::SoundSource &src = level.soundSources[i];
-                lara->playSound(src.id, vec3(float(src.x), float(src.y), float(src.z)), Sound::PAN | Sound::LOOP | Sound::STATIC);
+                playSound(src.id, vec3(float(src.x), float(src.y), float(src.z)), Sound::PAN | src.flags);
             }
 
             lastTitle       = false;
@@ -524,8 +450,100 @@ struct Level : IGame {
         Sound::stopAll();
     }
 
+    Controller* initController(int index) {
+        switch (level.entities[index].type) {
+            case TR::Entity::LARA                  :
+            case TR::Entity::CUT_1                 : return new Lara(this, index);
+            case TR::Entity::ENEMY_DOPPELGANGER    : return new Doppelganger(this, index);
+            case TR::Entity::ENEMY_WOLF            : return new Wolf(this, index);
+            case TR::Entity::ENEMY_BEAR            : return new Bear(this, index);
+            case TR::Entity::ENEMY_BAT             : return new Bat(this, index);
+            case TR::Entity::ENEMY_LION_MALE       :
+            case TR::Entity::ENEMY_LION_FEMALE     : return new Lion(this, index);
+            case TR::Entity::ENEMY_RAT_LAND        :
+            case TR::Entity::ENEMY_RAT_WATER       : return new Rat(this, index);
+            case TR::Entity::ENEMY_REX             : return new Rex(this, index);
+            case TR::Entity::ENEMY_RAPTOR          : return new Raptor(this, index);
+            case TR::Entity::ENEMY_MUTANT_1        :
+            case TR::Entity::ENEMY_MUTANT_2        :
+            case TR::Entity::ENEMY_MUTANT_3        : return new Mutant(this, index);
+            case TR::Entity::ENEMY_CENTAUR         : return new Centaur(this, index);
+            case TR::Entity::ENEMY_MUMMY           : return new Mummy(this, index);
+            case TR::Entity::ENEMY_CROCODILE_LAND  :
+            case TR::Entity::ENEMY_CROCODILE_WATER :
+            case TR::Entity::ENEMY_PUMA            :
+            case TR::Entity::ENEMY_GORILLA         : return new Enemy(this, index, 100, 10, 0.0f, 0.0f);
+            case TR::Entity::ENEMY_LARSON          : return new Larson(this, index);
+            case TR::Entity::ENEMY_PIERRE          : return new Pierre(this, index);
+            case TR::Entity::ENEMY_SKATEBOY        : return new SkaterBoy(this, index);
+            case TR::Entity::ENEMY_COWBOY          : return new Cowboy(this, index);
+            case TR::Entity::ENEMY_MR_T            : return new MrT(this, index);
+            case TR::Entity::ENEMY_NATLA           : return new Natla(this, index);
+            case TR::Entity::ENEMY_GIANT_MUTANT    : return new GiantMutant(this, index);
+            case TR::Entity::DOOR_1                :
+            case TR::Entity::DOOR_2                :
+            case TR::Entity::DOOR_3                :
+            case TR::Entity::DOOR_4                :
+            case TR::Entity::DOOR_5                :
+            case TR::Entity::DOOR_6                :
+            case TR::Entity::DOOR_BIG_1            :
+            case TR::Entity::DOOR_BIG_2            : return new Door(this, index);
+            case TR::Entity::TRAP_DOOR_1           :
+            case TR::Entity::TRAP_DOOR_2           : return new TrapDoor(this, index);
+            case TR::Entity::BRIDGE_0              :
+            case TR::Entity::BRIDGE_1              :
+            case TR::Entity::BRIDGE_2              : return new Bridge(this, index);
+            case TR::Entity::GEARS_1               :
+            case TR::Entity::GEARS_2               :
+            case TR::Entity::GEARS_3               : return new Gear(this, index);
+            case TR::Entity::TRAP_FLOOR            : return new TrapFloor(this, index);
+            case TR::Entity::CRYSTAL               : return new Crystal(this, index);
+            case TR::Entity::TRAP_BLADE            : return new TrapBlade(this, index);
+            case TR::Entity::TRAP_SPIKES           : return new TrapSpikes(this, index);
+            case TR::Entity::TRAP_BOULDER          : return new TrapBoulder(this, index);
+            case TR::Entity::TRAP_DART_EMITTER     : return new TrapDartEmitter(this, index);
+            case TR::Entity::DRAWBRIDGE            : return new Drawbridge(this, index);
+            case TR::Entity::BLOCK_1               :
+            case TR::Entity::BLOCK_2               :
+            case TR::Entity::BLOCK_3               :
+            case TR::Entity::BLOCK_4               : return new Block(this, index);
+            case TR::Entity::MOVING_BLOCK          : return new MovingBlock(this, index);
+            case TR::Entity::TRAP_CEILING_1        :
+            case TR::Entity::TRAP_CEILING_2        : return new TrapCeiling(this, index);
+            case TR::Entity::TRAP_SLAM             : return new TrapSlam(this, index);
+            case TR::Entity::TRAP_SWORD            : return new TrapSword(this, index);
+            case TR::Entity::HAMMER_HANDLE         : return new ThorHammer(this, index);
+            case TR::Entity::LIGHTNING             : return new Lightning(this, index);
+            case TR::Entity::DOOR_LATCH            : return new DoorLatch(this, index);
+            case TR::Entity::SWITCH                :
+            case TR::Entity::SWITCH_WATER          : return new Switch(this, index);
+            case TR::Entity::PUZZLE_HOLE_1         :
+            case TR::Entity::PUZZLE_HOLE_2         :
+            case TR::Entity::PUZZLE_HOLE_3         :
+            case TR::Entity::PUZZLE_HOLE_4         :
+            case TR::Entity::KEY_HOLE_1            :
+            case TR::Entity::KEY_HOLE_2            :
+            case TR::Entity::KEY_HOLE_3            :
+            case TR::Entity::KEY_HOLE_4            : return new KeyHole(this, index);
+            case TR::Entity::MIDAS_HAND            : return new MidasHand(this, index);
+            case TR::Entity::SCION_TARGET          : return new ScionTarget(this, index);
+            case TR::Entity::WATERFALL             : return new Waterfall(this, index);
+            case TR::Entity::TRAP_LAVA             : return new TrapLava(this, index);
+            case TR::Entity::CENTAUR_STATUE        : return new CentaurStatue(this, index);
+            case TR::Entity::CABIN                 : return new Cabin(this, index);
+            case TR::Entity::TRAP_FLAME_EMITTER    : return new TrapFlameEmitter(this, index);
+            case TR::Entity::BOAT                  : return new Boat(this, index);
+            case TR::Entity::EARTHQUAKE            : return new Earthquake(this, index);
+            case TR::Entity::MUTANT_EGG_SMALL      :
+            case TR::Entity::MUTANT_EGG_BIG        : return new MutantEgg(this, index);
+            default                                : return (level.entities[index].modelIndex > 0) ? new Controller(this, index) : new Sprite(this, index, 0);
+        }
+    }
+
     static void fillCallback(int id, int width, int height, int tileX, int tileY, void *userData, void *data) {
         static const uint32 barColor[UI::BAR_MAX][25] = {
+            // flash bar
+                { 0x00000000, 0xFFA20058, 0xFFFFFFFF, 0xFFA20058, 0x00000000 },
             // health bar
                 { 0xFF2C5D71, 0xFF5E81AE, 0xFF2C5D71, 0xFF1B4557, 0xFF16304F },
             // oxygen bar
@@ -570,6 +588,7 @@ struct Level : IGame {
                 uvCount = 4;
 
                 switch (id) {
+                    case UI::BAR_FLASH    :
                     case UI::BAR_HEALTH   :
                     case UI::BAR_OXYGEN   : 
                     case UI::BAR_OPTION   :
@@ -683,14 +702,10 @@ struct Level : IGame {
 
             tiles->add(uv, texIdx++);
         }
-        // add health bar
-        tiles->add(short4(2048, 2048, 2048, 2048 + 4), texIdx++);
-        // add oxygen bar
-        tiles->add(short4(4096, 4096, 4096, 4096 + 4), texIdx++);
-        // add option bar
-        tiles->add(short4(8192, 8192, 8192 + 4, 8192 + 4), texIdx++);
-        // add white color
-        tiles->add(short4(2048, 2048, 2048, 2048), texIdx++);
+        // add common textures
+        const short2 bar[UI::BAR_MAX] = { {0, 4}, {0, 4}, {0, 4}, {4, 4}, {0, 0} };
+        for (int i = 0; i < UI::BAR_MAX; i++)
+            tiles->add(short4(i * 32, 4096, i * 32 + bar[i].x, 4096 + bar[i].y), texIdx++);
 
         // get result texture
         atlas = tiles->pack();
@@ -752,36 +767,10 @@ struct Level : IGame {
             if (e.type == TR::Entity::CRYSTAL) {
                 Crystal *c = (Crystal*)e.controller;
                 renderEnvironment(c->getRoomIndex(), c->pos - vec3(0, 512, 0), &c->environment);
+                c->environment->generateMipMap();
             }
         }
         Core::endFrame();
-    }
-
-    void setRoomParams(int roomIndex, Shader::Type type, float diffuse, float ambient, float specular, float alpha, bool alphaTest = false) {
-        if (Core::pass == Core::passShadow) {
-            setShader(Core::pass, type);
-            return;
-        }
-
-        TR::Room &room = level.rooms[roomIndex];
-
-        if (room.flags.water)
-            setWaterParams(float(room.info.yTop));
-        else
-            setWaterParams(NO_CLIP_PLANE);
-
-        setShader(Core::pass, type, room.flags.water, alphaTest);
-
-        if (room.flags.water) {
-            if (waterCache)
-                waterCache->bindCaustics(roomIndex);
-            setWaterParams(float(room.info.yTop));
-        }
-
-        Core::active.shader->setParam(uParam, Core::params);
-        Core::active.shader->setParam(uMaterial, vec4(diffuse, ambient, specular, alpha));
-        if (Core::settings.detail.shadows > Core::Settings::MEDIUM)
-            Core::active.shader->setParam(uContacts, Core::contacts[0], MAX_CONTACTS);
     }
 
     void setMainLight(Controller *controller) {
@@ -896,8 +885,8 @@ struct Level : IGame {
             type = Shader::MIRROR;
 
         if (type == Shader::SPRITE) {
-            float alpha = (entity.type == TR::Entity::SMOKE || entity.type == TR::Entity::WATER_SPLASH) ? 0.75f : 1.0;
-            float diffuse = entity.isItem() ? 1.0f : 0.5f;
+            float alpha = (entity.type == TR::Entity::SMOKE || entity.type == TR::Entity::WATER_SPLASH) ? 0.75f : 1.0f;
+            float diffuse = entity.isPickup() ? 1.0f : 0.5f;
             setRoomParams(roomIndex, type, diffuse, intensityf(lum), controller->specular, alpha, isModel ? !mesh->models[entity.modelIndex - 1].opaque : true);
         } else
             setRoomParams(roomIndex, type, 1.0f, intensityf(lum), controller->specular, 1.0f, isModel ? !mesh->models[entity.modelIndex - 1].opaque : true);
@@ -927,11 +916,15 @@ struct Level : IGame {
     }
 
     void update() {
-        if (isCutscene() && !sndSoundtrack)
+        if (isCutscene() && (lara->health > 0.0f && !sndSoundtrack))
             return;
 
-        if (Input::state[cInventory] && level.id != TR::TITLE)
-            inventory.toggle();
+        if (Input::state[cInventory] && level.id != TR::TITLE) {
+            if (lara->health <= 0.0f)
+                inventory.toggle(Inventory::PAGE_OPTION, TR::Entity::INV_PASSPORT);
+            else
+                inventory.toggle();
+        }
 
         Sound::Sample *sndChanged = sndCurrent;
 
@@ -980,19 +973,30 @@ struct Level : IGame {
 
         switch (effect) {
             case TR::Effect::FLICKER : {
-                int idx = flickerIdx;
-                switch (flickerIdx) {
-                    case 0 : if (effectTimer > 3.0f) flickerIdx++; break;
-                    case 1 : if (effectTimer > 3.1f) flickerIdx++; break;
-                    case 2 : if (effectTimer > 3.5f) flickerIdx++; break;
-                    case 3 : if (effectTimer > 3.6f) flickerIdx++; break;
-                    case 4 : if (effectTimer > 4.1f) { flickerIdx++; effect = TR::Effect::NONE; } break;
+                int idx = effectIdx;
+                switch (effectIdx) {
+                    case 0 : if (effectTimer > 3.0f) effectIdx++; break;
+                    case 1 : if (effectTimer > 3.1f) effectIdx++; break;
+                    case 2 : if (effectTimer > 3.5f) effectIdx++; break;
+                    case 3 : if (effectTimer > 3.6f) effectIdx++; break;
+                    case 4 : if (effectTimer > 4.1f) { effectIdx++; effect = TR::Effect::NONE; } break;
                 }
-                if (idx != flickerIdx)
+                if (idx != effectIdx)
                     level.isFlipped = !level.isFlipped;
                 break;
             }
-            default : return;
+            case TR::Effect::EARTHQUAKE : {
+                switch (effectIdx) {
+                    case 0 : if (effectTimer > 0.0f) { playSound(TR::SND_ROCK);     effectIdx++; camera->shake = 1.0f; } break;
+                    case 1 : if (effectTimer > 0.1f) { playSound(TR::SND_STOMP);    effectIdx++; } break;
+                    case 2 : if (effectTimer > 0.6f) { playSound(TR::SND_BOULDER);  effectIdx++; camera->shake += 0.5f; } break;
+                    case 3 : if (effectTimer > 1.1f) { playSound(TR::SND_ROCK);     effectIdx++; } break;
+                    case 4 : if (effectTimer > 1.6f) { playSound(TR::SND_BOULDER);  effectIdx++; camera->shake += 0.5f; } break;
+                    case 5 : if (effectTimer > 2.3f) { playSound(TR::SND_BOULDER);  camera->shake += 0.5f; effect = TR::Effect::NONE; } break;
+                }
+                break;
+            }
+            default : effect = TR::Effect::NONE; return;
         }
     }
 
@@ -1004,10 +1008,19 @@ struct Level : IGame {
         setupBinding();
     }
 
+    // TODO: opqque/transparent pass for rooms and entities
+    void renderEntities(bool opaque) {
+        for (int i = 0; i < level.entitiesCount; i++) {
+            int modelIndex = level.entities[i].modelIndex;
+            if ((modelIndex < 0 && !opaque) || (modelIndex > 0 && mesh->models[modelIndex - 1].opaque == opaque))
+                renderEntity(level.entities[i]);
+        }
+    }
+
     void renderEntities() {
         PROFILE_MARKER("ENTITIES");
-        for (int i = 0; i < level.entitiesCount; i++)
-            renderEntity(level.entities[i]);
+        renderEntities(true);
+        renderEntities(false);
 
         for (int i = 0; i < level.entitiesCount; i++) {
             TR::Entity &entity = level.entities[i];
@@ -1480,7 +1493,7 @@ struct Level : IGame {
     }
 
     void renderUI() {
-        if (isCutscene()) return;
+        if (level.isCutsceneLevel()) return;
 
         UI::begin();
 

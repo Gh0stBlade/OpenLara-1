@@ -17,7 +17,7 @@
     E( LARA_MAGNUMS          ) \
     E( LARA_UZIS             ) \
     E( LARA_SPEC             ) \
-    E( ENEMY_TWIN            ) \
+    E( ENEMY_DOPPELGANGER    ) \
     E( ENEMY_WOLF            ) \
     E( ENEMY_BEAR            ) \
     E( ENEMY_BAT             ) \
@@ -51,13 +51,13 @@
     E( TRAP_SPIKES           ) \
     E( TRAP_BOULDER          ) \
     E( TRAP_DART             ) \
-    E( TRAP_DARTGUN          ) \
+    E( TRAP_DART_EMITTER     ) \
     E( DRAWBRIDGE            ) \
     E( TRAP_SLAM             ) \
     E( TRAP_SWORD            ) \
     E( HAMMER_HANDLE         ) \
     E( HAMMER_BLOCK          ) \
-    E( LIGHTNING_BALL        ) \
+    E( LIGHTNING             ) \
     E( DOOR_LATCH            ) \
     E( BLOCK_1               ) \
     E( BLOCK_2               ) \
@@ -139,7 +139,7 @@
     E( PUZZLE_DONE_4         ) \
     E( LEADBAR               ) \
     E( INV_LEADBAR           ) \
-    E( MIDAS_TOUCH           ) \
+    E( MIDAS_HAND            ) \
     E( KEY_ITEM_1            ) \
     E( KEY_ITEM_2            ) \
     E( KEY_ITEM_3            ) \
@@ -154,10 +154,10 @@
     E( KEY_HOLE_4            ) \
     E( UNUSED_4              ) \
     E( UNUSED_5              ) \
-    E( SCION_1               ) \
-    E( SCION_2               ) \
-    E( SCION_3               ) \
+    E( SCION_QUALOPEC        ) \
+    E( SCION_DROP            ) \
     E( SCION_TARGET          ) \
+    E( SCION_NATLA           ) \
     E( SCION_HOLDER          ) \
     E( UNUSED_6              ) \
     E( UNUSED_7              ) \
@@ -172,7 +172,7 @@
     E( BLOOD                 ) \
     E( UNUSED_12             ) \
     E( SMOKE                 ) \
-    E( STATUE                ) \
+    E( CENTAUR_STATUE        ) \
     E( CABIN                 ) \
     E( MUTANT_EGG_SMALL      ) \
     E( RICOCHET              ) \
@@ -187,10 +187,10 @@
     E( MUTANT_GRENADE        ) \
     E( UNUSED_16             ) \
     E( UNUSED_17             ) \
-    E( LAVA_PARTICLE         ) \
-    E( LAVA_EMITTER          ) \
-    E( FLAME                 ) \
-    E( FLAME_EMITTER         ) \
+    E( TRAP_LAVA_PARTICLE    ) \
+    E( TRAP_LAVA_EMITTER     ) \
+    E( TRAP_FLAME            ) \
+    E( TRAP_FLAME_EMITTER    ) \
     E( TRAP_LAVA             ) \
     E( MUTANT_EGG_BIG        ) \
     E( BOAT                  ) \
@@ -254,6 +254,9 @@ namespace TR {
         SND_SHOTGUN_RELOAD  = 9,
         SND_RICOCHET        = 10,
         
+        SND_HIT_BEAR        = 16,
+        SND_HIT_WOLF        = 20,
+
         SND_SCREAM          = 30,
         SND_HIT             = 31,
         
@@ -265,8 +268,20 @@ namespace TR {
         
         SND_UNDERWATER      = 60,
 
+        SND_BOULDER         = 70,
+
         SND_FLOOD           = 81,
+
+        SND_HIT_LION        = 85,
+
+        SND_HIT_RAT         = 95,
         
+        SND_LIGHTNING       = 98,
+        SND_ROCK            = 99,
+
+        SND_SWORD           = 103,
+        SND_EXPLOSION       = 104,
+
         SND_INV_SPIN        = 108,
         SND_INV_HOME        = 109,
         SND_INV_CONTROLS    = 110,
@@ -277,9 +292,18 @@ namespace TR {
         SND_INV_PAGE        = 115,
         SND_HEALTH          = 116,
         
-        SND_EFFECT_8        = 119,
+        SND_STAIRS2SLOPE    = 119,
+
+        SND_HIT_SKATEBOY    = 132,
+
+        SND_HIT_MUTANT      = 142,
+        SND_STOMP           = 147,
+        
+        SND_FLAME           = 150,
         SND_DART            = 151,
         
+        SND_TNT             = 170,
+        SND_MUTANT_DEATH    = 171,
         SND_SECRET          = 173,
     };
 
@@ -307,12 +331,16 @@ namespace TR {
 
     enum HitType {
         HIT_DEFAULT,
+        HIT_FALL,
         HIT_BLADE,
         HIT_BOULDER,
         HIT_SPIKES,
-        HIT_FLAME,
+        HIT_SWORD,
+        HIT_LAVA,
         HIT_SLAM,
         HIT_REX,
+        HIT_LIGHTNING,
+        HIT_MIDAS,
     };
 
     enum Action : uint16 {
@@ -366,8 +394,12 @@ namespace TR {
             0, -612, 30,    {{-300, 0, -692}, {300, 0, -512}}, true, false
         };
 
+        Limit MIDAS = { 
+            512, -612, 30,  {{-700, 284, -700}, {700, 996, 700}}, true, false
+        };
+
         Limit SCION = { 
-            640, -202, 30,   {{-256, 540, -350}, {256, 740, -200}}, false, false
+            640, -202, 30,  {{-256, 540, -350}, {256, 740, -200}}, false, false
         };
     }
 
@@ -561,7 +593,7 @@ namespace TR {
             FLOOR   ,
             CEILING ,
             TRIGGER ,
-            KILL    ,
+            LAVA    ,
         };
     };
 
@@ -624,7 +656,7 @@ namespace TR {
         void    *controller;    // Controller implementation or NULL
 
         bool isEnemy() const {
-            return type >= ENEMY_TWIN && type <= ENEMY_GIANT_MUTANT;
+            return (type >= ENEMY_DOPPELGANGER && type <= ENEMY_GIANT_MUTANT) || type == SCION_TARGET;
         }
 
         bool isBigEnemy() const {
@@ -639,14 +671,17 @@ namespace TR {
             return isEnemy() ||
                    isDoor() ||
                    (type == DRAWBRIDGE && flags.active != ACTIVE) ||
-                   (type == SCION_HOLDER);
+                   (type == SCION_HOLDER) ||
+                   ((type == HAMMER_HANDLE || type == HAMMER_BLOCK) && flags.collision) ||
+                   (type == CRYSTAL);
         }
 
-        bool isItem() const {
+        bool isPickup() const {
             return (type >= PISTOLS && type <= AMMO_UZIS) ||
                    (type >= PUZZLE_1 && type <= PUZZLE_4) ||
                    (type >= KEY_ITEM_1 && type <= KEY_ITEM_4) ||
-                   (type == MEDIKIT_SMALL || type == MEDIKIT_BIG || type == SCION_1); // TODO: recheck all items
+                   (type == MEDIKIT_SMALL || type == MEDIKIT_BIG) || 
+                   (type == SCION_QUALOPEC || type == SCION_DROP || type == SCION_NATLA || type == LEADBAR); // TODO: recheck all items
         }
 
         bool isActor() const {
@@ -658,7 +693,7 @@ namespace TR {
         }
 
         bool isBlock() const {
-            return type >= TR::Entity::BLOCK_1 && type <= TR::Entity::BLOCK_4;
+            return type >= BLOCK_1 && type <= BLOCK_4;
         }
 
         bool isLara() const {
@@ -666,7 +701,7 @@ namespace TR {
         }
 
         bool castShadow() const {
-            return isLara() || isEnemy() || isActor();
+            return isLara() || isEnemy() || isActor() || type == TRAP_DART || type == TRAP_SWORD;
         }
 
         void getAxis(int &dx, int &dz) {
@@ -720,6 +755,7 @@ namespace TR {
                 case KEY_HOLE_2    : return KEY_ITEM_2; break;
                 case KEY_HOLE_3    : return KEY_ITEM_3; break;
                 case KEY_HOLE_4    : return KEY_ITEM_4; break;
+                case MIDAS_HAND    : return LEADBAR;    break;
                 default            : return NONE;
             }
         }
@@ -729,13 +765,16 @@ namespace TR {
                 && type != ENEMY_REX
                 && type != ENEMY_RAPTOR
                 && type != ENEMY_MUTANT_1
+                && type != ENEMY_MUTANT_2
+                && type != ENEMY_MUTANT_3
                 && type != ENEMY_CENTAUR
+                && type != ENEMY_GIANT_MUTANT
                 && type != ENEMY_MUMMY
                 && type != ENEMY_NATLA)
                 opaque = true;
             if (type == SWITCH || type == SWITCH_WATER)
                 opaque = true;
-            if (type == PUZZLE_HOLE_1) // LEVEL3A cogs
+            if (type == PUZZLE_HOLE_1 || type == LIGHTNING) // LEVEL3A cogs
                 opaque = false;
         }
     };
@@ -932,7 +971,7 @@ namespace TR {
         uint16 volume;
         uint16 chance;   // If !=0 and ((rand()&0x7fff) > Chance), this sound is not played
         union {
-            struct { uint16 mode:2, count:4, unused:6, fixed:1, pitch:1, gain:1, :1; };
+            struct { uint16 mode:2, count:4, unused:6, camera:1, pitch:1, gain:1, :1; };
             uint16 value;
         } flags;
     };
@@ -1120,7 +1159,7 @@ namespace TR {
             int slantX, slantZ;
             int floorIndex;
             int boxIndex;
-            int kill;
+            int lava;
             int trigCmdCount;
             Trigger trigger;
             FloorData::TriggerInfo trigInfo;
@@ -1479,7 +1518,7 @@ namespace TR {
                 }
                 
             for (int i = 0; i < spriteSequencesCount; i++) 
-                if (spriteSequences[i].type == TR::Entity::GLYPH) {
+                if (spriteSequences[i].type == Entity::GLYPH) {
                     extra.glyphSeq = i;
                     break;
                 }
@@ -1544,39 +1583,54 @@ namespace TR {
             isHomeLevel = false;
             switch (size) {
                 case 508614  :
+                case 316138  :
                 case 316460  : return TITLE;
                 case 1074234 :
+                case 3236806 :
                 case 3237128 : isHomeLevel = true; return GYM;
                 case 1448896 :
+                case 2533312 :
                 case 2533634 : return LEVEL_1;
                 case 2873406 : isDemoLevel = true; return LEVEL_2;
                 case 1535734 :
+                case 2873128 :
                 case 2873450 : return LEVEL_2;
                 case 1630560 :
+                case 2934408 :
                 case 2934730 : return LEVEL_3A;
                 case 1506614 :
+                case 2737936 :
                 case 2738258 : return LEVEL_3B;
                 case 722402  :
                 case 599840  : return CUTSCENE_1;
                 case 1621970 :
+                case 3030550 :
                 case 3030872 : return LEVEL_4;
                 case 1585942 :
+                case 2718218 :
                 case 2718540 : return LEVEL_5;
                 case 1708464 :
+                case 3139590 :
                 case 3074376 : return LEVEL_6;
                 case 1696664 :
+                case 2817290 :
                 case 2817612 : return LEVEL_7A;
                 case 1733274 :
+                case 3388774 :
                 case 3389096 : return LEVEL_7B;
                 case 542960  :
                 case 354320  : return CUTSCENE_2;
                 case 1563356 :
+                case 2880242 :
                 case 2880564 : return LEVEL_8A;
                 case 1565630 :
+                case 2886434 :
                 case 2886756 : return LEVEL_8B;
                 case 1619360 :
+                case 3105128 :
                 case 3105450 : return LEVEL_8C;
                 case 1678018 :
+                case 3223816 :
                 case 3224138 : return LEVEL_10A;
                 case 636660  :
                 case 512104  : return CUTSCENE_3;
@@ -1585,8 +1639,11 @@ namespace TR {
                 case 940398  :
                 case 879582  : return CUTSCENE_4;
                 case 1814278 :
+                case 3531702 :
                 case 3532024 : return LEVEL_10C;
+                case 3278614 :
                 case 3279242 : return LEVEL_EGYPT;
+                case 3270370 :
                 case 3270998 : return LEVEL_CAT;
                 case 3208018 : return LEVEL_END;
                 case 3153300 : return LEVEL_END2;
@@ -1617,6 +1674,10 @@ namespace TR {
                     default : ;
                 }
             }
+        }
+
+        bool isCutsceneLevel() {
+            return cutEntity > -1;
         }
 
         void readMeshes(Stream &stream) {
@@ -2015,6 +2076,9 @@ namespace TR {
         }
 
         int16 getModelIndex(Entity::Type type) const {
+            if (type == Entity::ENEMY_MUTANT_2 || type == Entity::ENEMY_MUTANT_3)
+                type = Entity::ENEMY_MUTANT_1; // hardcoded mutant models remapping
+
             for (int i = 0; i < modelsCount; i++)
                 if (type == models[i].type)
                     return i + 1;
@@ -2027,7 +2091,7 @@ namespace TR {
             return 0;
         }
 
-        int entityAdd(TR::Entity::Type type, int16 room, int32 x, int32 y, int32 z, angle rotation, int16 intensity) {
+        int entityAdd(Entity::Type type, int16 room, int32 x, int32 y, int32 z, angle rotation, int16 intensity) {
             for (int i = entitiesBaseCount; i < entitiesCount; i++) 
                 if (entities[i].type == Entity::NONE) {
                     Entity &e = entities[i];
@@ -2106,8 +2170,8 @@ namespace TR {
                 int sz = (z - room.info.z) >> 10;
 
                 if (sz <= 0 || sz >= room.xSectors - 1) {
-                    sx = clamp(sx, 1, room.xSectors - 2);
-                    sz = clamp(sz, 0, room.zSectors - 1);
+                    sx = clamp(sx, 0, room.xSectors - 1);
+                    sz = clamp(sz, 1, room.zSectors - 2);
                 } else
                     sx = clamp(sx, 0, room.xSectors - 1);
 
@@ -2149,7 +2213,7 @@ namespace TR {
             info.roomAbove    = s.roomAbove;
             info.floorIndex   = s.floorIndex;
             info.boxIndex     = s.boxIndex;
-            info.kill         = 0;
+            info.lava         = false;
             info.trigger      = Trigger::ACTIVATE;
             info.trigCmdCount = 0;
 
@@ -2237,6 +2301,13 @@ namespace TR {
                             }
                             break;
                         }
+                        case Entity::HAMMER_HANDLE : {
+                            int dirX, dirZ;
+                            e.getAxis(dirX, dirZ);
+                            if (abs(e.x + dirX * 1024 * 3 - x) < 512 && abs(e.z + dirZ * 1024 * 3 - z) < 512)
+                                info.floor -= 1024 * 3;
+                            break;
+                        }
                         case Entity::BRIDGE_0    : 
                         case Entity::BRIDGE_1    : 
                         case Entity::BRIDGE_2    : {
@@ -2321,8 +2392,8 @@ namespace TR {
                         break;
                     }
 
-                    case FloorData::KILL :
-                        info.kill = 1;
+                    case FloorData::LAVA :
+                        info.lava = true;
                         break;
 
                     default : LOG("unknown func: %d\n", cmd.func);
