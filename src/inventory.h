@@ -180,8 +180,19 @@ struct Inventory {
 //              add(TR::Entity::INV_MEDIKIT_SMALL, 999);
 //              add(TR::Entity::INV_MEDIKIT_BIG, 999);
 //              add(TR::Entity::INV_SCION, 1);
-//              add(TR::Entity::INV_KEY_1, 1);
-//              add(TR::Entity::INV_PUZZLE_1, 1);
+        #ifdef _DEBUG
+            add(TR::Entity::INV_KEY_1, 3);
+            add(TR::Entity::INV_KEY_2, 3);
+            add(TR::Entity::INV_KEY_3, 3);
+            add(TR::Entity::INV_KEY_4, 3);
+
+            add(TR::Entity::INV_PUZZLE_1, 3);
+            add(TR::Entity::INV_PUZZLE_2, 3);
+            add(TR::Entity::INV_PUZZLE_3, 3);
+            add(TR::Entity::INV_PUZZLE_4, 3);
+
+            add(TR::Entity::INV_LEADBAR, 3);
+        #endif
         } 
 
         if (id == TR::TITLE) {
@@ -323,7 +334,7 @@ struct Inventory {
         if (phaseRing == 0.0f || phaseRing == 1.0f) {
             active = !active;
             vec3 p;
-            game->playSound(active ? TR::SND_INV_SHOW : TR::SND_INV_HIDE, p, 0, 0);
+            game->playSound(active ? TR::SND_INV_SHOW : TR::SND_INV_HIDE, p);
             chosen = false;
 
             if (active) {
@@ -342,6 +353,9 @@ struct Inventory {
                 }
 
                 index = targetIndex = pageItemIndex[page];
+
+                //if (type == TR::Entity::INV_PASSPORT) // toggle after death
+                //    chooseItem();
             }
         }
         return active;
@@ -409,7 +423,7 @@ struct Inventory {
 
         switch (item->type) {
             case TR::Entity::INV_PASSPORT : {
-                game->playSound(TR::SND_INV_PAGE, vec3(), 0, 0);
+                game->playSound(TR::SND_INV_PAGE);
                 item->value = 1;
                 passportSlotCount = 2;
                 passportSlots[0] = TR::LEVEL_1;
@@ -432,8 +446,8 @@ struct Inventory {
                 if (key == cDown ) { slot = (slot + 1) % passportSlotCount; };
             }
         // passport pages
-            if (key == cLeft  && item->value > 0) { item->value--; item->anim->dir = -1.0f; game->playSound(TR::SND_INV_PAGE, vec3(), 0, 0); }
-            if (key == cRight && item->value < 2) { item->value++; item->anim->dir =  1.0f; game->playSound(TR::SND_INV_PAGE, vec3(), 0, 0); }
+            if (key == cLeft  && item->value > 0) { item->value--; item->anim->dir = -1.0f; game->playSound(TR::SND_INV_PAGE); }
+            if (key == cRight && item->value < 2) { item->value++; item->anim->dir =  1.0f; game->playSound(TR::SND_INV_PAGE); }
 
             if (key == cAction && phaseChoose == 1.0f) {
                 TR::LevelID id = game->getLevel()->id;
@@ -467,7 +481,7 @@ struct Inventory {
                         case 3 : settings.detail.setWater(q);    break;
                     }
                     if (q == settings.detail.quality[slot])
-                        game->playSound(TR::SND_INV_PAGE, vec3(), 0, 0);
+                        game->playSound(TR::SND_INV_PAGE);
                 }
             }
 
@@ -488,7 +502,7 @@ struct Inventory {
                     v = key == cLeft ? max(0.0f, v - 0.05f) : min(1.0f, v + 0.05f);
                     changeTimer = 0.2f;
                     if (slot == 1)
-                        game->playSound(TR::SND_PISTOLS_SHOT, vec3(), 0, 0);
+                        game->playSound(TR::SND_PISTOLS_SHOT);
                     game->applySettings(Core::settings);
                 }
             }
@@ -554,8 +568,8 @@ struct Inventory {
 
         if (index == targetIndex && targetPage == page && ready) {
             if (!chosen) {
-                if (key == cUp   && !(page < PAGE_ITEMS  && getItemsCount(page + 1))) key = cMAX;
-                if (key == cDown && !(page > PAGE_OPTION && getItemsCount(page - 1))) key = cMAX;
+                if ((key == cUp && !canFlipPage(-1)) || (key == cDown && !canFlipPage( 1)))
+                    key = cMAX;
 
                 switch (key) {
                     case cLeft  : { phaseSelect = 0.0f; targetIndex = (targetIndex - 1 + count) % count; } break;
@@ -565,26 +579,11 @@ struct Inventory {
                     default : ;
                 }
 
-                if (index != targetIndex) {
-                    vec3 p;
-                    game->playSound(TR::SND_INV_SPIN, p, 0, 0);
-                }
+                if (index != targetIndex)
+                    game->playSound(TR::SND_INV_SPIN);
 
-                if (lastKey != key && key == cAction && phaseChoose == 0.0f) {
-                    vec3 p;
-                    chosen = true;
-                    switch (item->type) {
-                        case TR::Entity::INV_COMPASS  : game->playSound(TR::SND_INV_COMPASS, p, 0, 0);   break;
-                        case TR::Entity::INV_HOME     : game->playSound(TR::SND_INV_HOME, p, 0, 0);      break;
-                        case TR::Entity::INV_CONTROLS : game->playSound(TR::SND_INV_CONTROLS, p, 0, 0);  break;
-                        case TR::Entity::INV_PISTOLS  :
-                        case TR::Entity::INV_SHOTGUN  :
-                        case TR::Entity::INV_MAGNUMS  :
-                        case TR::Entity::INV_UZIS     : game->playSound(TR::SND_INV_WEAPON, p, 0, 0);    break;
-                        default                       : game->playSound(TR::SND_INV_SHOW, p, 0, 0);      break;
-                    }
-                    item->choose();
-                }
+                if (lastKey != key && key == cAction && phaseChoose == 0.0f)
+                    chooseItem();
             } else {
                 if (changeTimer > 0.0f) {
                     changeTimer -= Core::deltaTime;
@@ -653,6 +652,32 @@ struct Inventory {
 
         if (!isActive() && nextLevel != TR::LEVEL_MAX)
             game->loadLevel(nextLevel);
+    }
+
+    void chooseItem() {
+        Item *item = items[getGlobalIndex(page, index)];
+
+        vec3 p;
+        chosen = true;
+        switch (item->type) {
+            case TR::Entity::INV_COMPASS  : game->playSound(TR::SND_INV_COMPASS);   break;
+            case TR::Entity::INV_HOME     : game->playSound(TR::SND_INV_HOME);      break;
+            case TR::Entity::INV_CONTROLS : game->playSound(TR::SND_INV_CONTROLS);  break;
+            case TR::Entity::INV_PISTOLS  :
+            case TR::Entity::INV_SHOTGUN  :
+            case TR::Entity::INV_MAGNUMS  :
+            case TR::Entity::INV_UZIS     : game->playSound(TR::SND_INV_WEAPON);    break;
+            default                       : game->playSound(TR::SND_INV_SHOW);      break;
+        }
+        item->choose();
+    }
+
+    bool canFlipPage(int dir) {
+        if (((Character*)game->getLara())->health <= 0.0f)
+            return false;
+        if (dir == -1) return page < PAGE_ITEMS  && getItemsCount(page + 1);
+        if (dir ==  1) return page > PAGE_OPTION && getItemsCount(page - 1);
+        return false;
     }
 
     void prepareBackground() {
@@ -945,7 +970,7 @@ struct Inventory {
         Core::setDepthTest(true);
         Core::setBlending(bmAlpha);
 
-        if (game->isCutscene())
+        if (game->getLevel()->isCutsceneLevel())
             return;
 
     // items
@@ -995,12 +1020,12 @@ struct Inventory {
         if (game->getLevel()->id != TR::TITLE)
             UI::textOut(vec2( 0, 32), pageTitle[page], UI::aCenter, UI::width);
 
-        if (page < PAGE_ITEMS && getItemsCount(page + 1)) {
+        if (canFlipPage(-1)) {
             UI::textOut(vec2(16, 32), "[", UI::aLeft, UI::width);
             UI::textOut(vec2( 0, 32), "[", UI::aRight, UI::width - 20);
         }
 
-        if (page > PAGE_OPTION && getItemsCount(page - 1)) {
+        if (canFlipPage(1)) {
             UI::textOut(vec2(16, 480 - 16), "]", UI::aLeft, UI::width);
             UI::textOut(vec2(0,  480 - 16), "]", UI::aRight, UI::width - 20);
         }
