@@ -2,6 +2,7 @@
 #define H_CHARACTER
 
 #include "controller.h"
+#include "collision.h"
 
 struct Character : Controller {
     float   health;
@@ -50,8 +51,8 @@ struct Character : Controller {
 
         rangeChest = vec4(-0.80f, 0.80f, -0.75f, 0.75f) * PI;
         rangeHead  = vec4(-0.25f, 0.25f, -0.50f, 0.50f) * PI;
-
         animation.initOverrides();
+
         rotHead  = rotChest = quat(0, 0, 0, 1);
 
         flying = getEntity().type == TR::Entity::ENEMY_BAT;
@@ -69,7 +70,8 @@ struct Character : Controller {
     }
 
     uint16* getZones() {
-        return flying ? level->zones[level->isFlipped].fly : (stepHeight == 256 ? level->zones[level->isFlipped].ground1 : level->zones[level->isFlipped].ground2);
+        TR::Zone &zones = level->zones[level->state.flags.flipped];
+        return (flying || stand == STAND_UNDERWATER || stand == STAND_ONWATER) ? zones.fly : (stepHeight == 256 ? zones.ground1 : zones.ground2);
     }
 
     void rotateY(float delta) {
@@ -87,28 +89,26 @@ struct Character : Controller {
 
     virtual void checkRoom() {
         TR::Level::FloorInfo info;
-        TR::Entity &e = getEntity();
-        level->getFloorInfo(e.room, e.x, e.y, e.z, info);
+        getFloorInfo(getRoomIndex(), pos, info);
 
         if (info.roomNext != TR::NO_ROOM)
-            e.room = info.roomNext;        
+            roomIndex = info.roomNext;        
 
-        if (info.roomBelow != TR::NO_ROOM && e.y > info.roomFloor)
-            e.room = info.roomBelow;
+        if (info.roomBelow != TR::NO_ROOM && pos.y > info.roomFloor)
+            roomIndex = info.roomBelow;
 
-        if (info.roomAbove != TR::NO_ROOM && e.y <= info.roomCeiling) {
+        if (info.roomAbove != TR::NO_ROOM && pos.y <= info.roomCeiling) {
             TR::Room *room = &level->rooms[info.roomAbove];
-            if (level->isFlipped && room->alternateRoom > -1)
+            if (level->state.flags.flipped && room->alternateRoom > -1)
                 room = &level->rooms[room->alternateRoom];
 
             if (stand == STAND_UNDERWATER && !room->flags.water) {
                 stand = STAND_ONWATER;
                 velocity.y = 0;
-                pos.y = float(info.roomCeiling);
-                updateEntity();
+                pos.y = info.roomCeiling;
             } else
                 if (stand != STAND_ONWATER)
-                    e.room = info.roomAbove;
+                    roomIndex = info.roomAbove;
         }
     }
 
@@ -179,7 +179,7 @@ struct Character : Controller {
         updateState();
         Controller::update();
 
-        if (getEntity().flags.active) {
+        if (flags.active) {
             updateVelocity();
             updatePosition();
             if (p != pos) {

@@ -15,7 +15,9 @@ struct Sprite : Controller {
     float time;
     vec3  velocity;
 
-    Sprite(IGame *game, int entity, bool instant = true, int frame = FRAME_ANIMATED) : Controller(game, entity), instant(instant), flag(frame), time(0), velocity(0) {
+    BlendMode blendMode;
+
+    Sprite(IGame *game, int entity, bool instant = true, int frame = FRAME_ANIMATED) : Controller(game, entity), instant(instant), flag(frame), time(0), velocity(0), blendMode(bmAlpha) {
         if (frame >= 0) { // specific frame
             this->frame = frame;
         } else if (frame == FRAME_RANDOM) { // random frame
@@ -23,18 +25,6 @@ struct Sprite : Controller {
         } else if (frame == FRAME_ANIMATED) { // animated
             this->frame = 0;
         }
-    }
-
-    static int add(IGame *game, TR::Entity::Type type, int room, int x, int y, int z, int frame = -1, bool empty = false) {
-        TR::Level *level = game->getLevel();
-        int index = level->entityAdd(type, room, x, y, z, 0, -1);
-        if (index > -1) {
-            level->entities[index].intensity  = 0x1FFF - level->rooms[room].ambient;
-            level->entities[index].controller = empty ? NULL : new Sprite(game, index, true, frame);
-            if (level->entities[index].controller)
-                ((Controller*)level->entities[index].controller)->activate();
-        }
-        return index;
     }
 
     TR::SpriteSequence& getSequence() {
@@ -60,14 +50,12 @@ struct Sprite : Controller {
 
         pos += velocity * (30.0f * Core::deltaTime);
 
-        if (remove) {
-            level->entityRemove(entity);
-            delete this;
-        }
+        if (remove)
+            game->removeEntity(this);
     }
 
     virtual void render(Frustum *frustum, MeshBuilder *mesh, Shader::Type type, bool caustics) {
-        Core::setBlending(bmAlpha);
+        Core::setBlending(blendMode);
         Core::active.shader->setParam(uBasis, Basis(Core::mViewInv.getRot(), pos));
         mesh->renderSprite(-(getEntity().modelIndex + 1), frame);
         Core::setBlending(bmNone);

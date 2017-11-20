@@ -134,7 +134,7 @@ struct Inventory {
 
             TR::Level *level = game->getLevel();
             TR::Model &m     = level->models[desc.model];
-            Basis joints[34];
+            Basis joints[MAX_SPHERES];
 
             anim->getJoints(basis, -1, true, joints);
 
@@ -158,7 +158,7 @@ struct Inventory {
         delete stream;
     }
 
-    Inventory(IGame *game) : game(game), active(false), chosen(false), index(0), targetIndex(0), page(PAGE_OPTION), targetPage(PAGE_OPTION), itemsCount(0), changeTimer(0.0f), nextLevel(TR::LEVEL_MAX), lastKey(cMAX) {
+    Inventory(IGame *game) : game(game), active(false), chosen(false), index(0), targetIndex(0), page(PAGE_OPTION), targetPage(PAGE_OPTION), itemsCount(0), changeTimer(0.0f), nextLevel(TR::LVL_MAX), lastKey(cMAX) {
         TR::LevelID id = game->getLevel()->id;
 
         add(TR::Entity::INV_PASSPORT);
@@ -166,7 +166,7 @@ struct Inventory {
         add(TR::Entity::INV_SOUND);
         add(TR::Entity::INV_CONTROLS);
 
-        if (id != TR::TITLE && id != TR::GYM) {
+        if (!game->getLevel()->isTitle() && id != TR::LVL_TR1_GYM && id != TR::LVL_TR2_ASSAULT) {
 /*
             if (level->extra.inv.map != -1)
                 add(TR::Entity::INV_MAP);
@@ -195,7 +195,7 @@ struct Inventory {
         #endif
         } 
 
-        if (id == TR::TITLE) {
+        if (game->getLevel()->isTitle()) {
             add(TR::Entity::INV_HOME);
 
             memset(background, 0, sizeof(background));
@@ -248,23 +248,25 @@ struct Inventory {
         }
     }
 
-    void add(TR::Entity::Type type, int count = 1) {
+    void add(TR::Entity::Type type, int count = 1, bool smart = true) {
         type = TR::Entity::convToInv(type);
 
-        switch (type) {
-            case TR::Entity::INV_SHOTGUN      :
-            case TR::Entity::INV_AMMO_SHOTGUN : 
-                addAmmo(type, count,  2, TR::Entity::INV_SHOTGUN, TR::Entity::INV_AMMO_SHOTGUN);
-                break;
-            case TR::Entity::INV_MAGNUMS      :
-            case TR::Entity::INV_AMMO_MAGNUMS :
-                addAmmo(type, count, 25, TR::Entity::INV_MAGNUMS, TR::Entity::INV_AMMO_MAGNUMS);
-                break;
-            case TR::Entity::INV_UZIS         :
-            case TR::Entity::INV_AMMO_UZIS    : 
-                addAmmo(type, count, 50, TR::Entity::INV_UZIS, TR::Entity::INV_AMMO_UZIS);
-                break;
-            default : ;
+        if (smart) {
+            switch (type) {
+                case TR::Entity::INV_SHOTGUN      :
+                case TR::Entity::INV_AMMO_SHOTGUN : 
+                    addAmmo(type, count,  2, TR::Entity::INV_SHOTGUN, TR::Entity::INV_AMMO_SHOTGUN);
+                    break;
+                case TR::Entity::INV_MAGNUMS      :
+                case TR::Entity::INV_AMMO_MAGNUMS :
+                    addAmmo(type, count, 25, TR::Entity::INV_MAGNUMS, TR::Entity::INV_AMMO_MAGNUMS);
+                    break;
+                case TR::Entity::INV_UZIS         :
+                case TR::Entity::INV_AMMO_UZIS    : 
+                    addAmmo(type, count, 50, TR::Entity::INV_UZIS, TR::Entity::INV_AMMO_UZIS);
+                    break;
+                default : ;
+            }
         }
 
         int i = contains(type);
@@ -274,6 +276,12 @@ struct Inventory {
         }
 
         ASSERT(itemsCount < INVENTORY_MAX_ITEMS);
+
+        Item *newItem = new Item(game->getLevel(), type, count);
+        if (newItem->desc.model == -1) {
+            delete newItem;
+            return;
+        }
 
         int pos = 0;
         for (int pos = 0; pos < itemsCount; pos++)
@@ -285,7 +293,7 @@ struct Inventory {
                 items[i] = items[i - 1];
         }
 
-        items[pos] = new Item(game->getLevel(), type, count);
+        items[pos] = newItem;
         itemsCount++;
     }
 
@@ -313,7 +321,7 @@ struct Inventory {
     
     bool chooseKey(TR::Entity::Type hole) {
         TR::Entity::Type type = TR::Entity::getItemForHole(hole);
-        if (type == TR::Entity::NONE)
+        if (type == TR::Entity::LARA)
             return false;
         int index = contains(type);
         if (index < 0)
@@ -330,7 +338,7 @@ struct Inventory {
         return false;
     }
 
-    bool toggle(Page curPage = PAGE_INVENTORY, TR::Entity::Type type = TR::Entity::NONE) {
+    bool toggle(Page curPage = PAGE_INVENTORY, TR::Entity::Type type = TR::Entity::LARA) {
         if (phaseRing == 0.0f || phaseRing == 1.0f) {
             active = !active;
             vec3 p;
@@ -341,12 +349,12 @@ struct Inventory {
                 for (int i = 0; i < itemsCount; i++)
                     items[i]->reset();
 
-                nextLevel   = TR::LEVEL_MAX;
+                nextLevel   = TR::LVL_MAX;
                 phasePage   = 1.0f;
                 phaseSelect = 1.0f;
                 page        = targetPage  = curPage;
 
-                if (type != TR::Entity::NONE) {
+                if (type != TR::Entity::LARA) {
                     int i = contains(type);
                     if (i >= 0)
                         pageItemIndex[page] = getLocalIndex(i);
@@ -413,6 +421,7 @@ struct Inventory {
     }
 
     bool showHealthBar() {
+        if (!itemsCount) return false;
         int idx = getGlobalIndex(page, index);
         TR::Entity::Type type = items[idx]->type;
         return active && phaseRing == 1.0f && index == targetIndex && phasePage == 1.0f && (type == TR::Entity::INV_MEDIKIT_SMALL || type == TR::Entity::INV_MEDIKIT_BIG);
@@ -426,8 +435,8 @@ struct Inventory {
                 game->playSound(TR::SND_INV_PAGE);
                 item->value = 1;
                 passportSlotCount = 2;
-                passportSlots[0] = TR::LEVEL_1;
-                passportSlots[1] = TR::LEVEL_2;
+                passportSlots[0] = TR::LVL_TR1_1;
+                passportSlots[1] = TR::LVL_TR1_2;
                 break;
             }
             case TR::Entity::INV_DETAIL : {
@@ -453,11 +462,11 @@ struct Inventory {
                 TR::LevelID id = game->getLevel()->id;
                 switch (item->value) {
                     case 0 : nextLevel = passportSlots[slot]; break;
-                    case 1 : nextLevel = (id == TR::TITLE) ? TR::LEVEL_1 : game->getLevel()->id; break;
-                    case 2 : nextLevel = (id == TR::TITLE) ? TR::LEVEL_MAX : TR::TITLE; break;
+                    case 1 : nextLevel = id == TR::LVL_TR1_TITLE ? TR::LVL_TR1_1 : (id == TR::LVL_TR2_TITLE ? TR::LVL_TR2_WALL : id); break;
+                    case 2 : nextLevel = game->getLevel()->isTitle() ? TR::LVL_MAX : game->getLevel()->titleId(); break;
                 }
 
-                if (nextLevel != TR::LEVEL_MAX) {
+                if (nextLevel != TR::LVL_MAX) {
                     item->anim->dir = -1.0f;
                     item->value = -100;
                     toggle();
@@ -466,10 +475,10 @@ struct Inventory {
         }
 
         if (item->type == TR::Entity::INV_DETAIL) {
-            int count = 5;
+            int count = 6;
             if (key == cUp   ) { slot = (slot - 1 + count) % count; };
             if (key == cDown ) { slot = (slot + 1) % count;         };
-            if (slot < count - 1) {
+            if (slot < count - 2) {
                 Core::Settings::Quality q = settings.detail.quality[slot];
                 if (key == cLeft  && q > Core::Settings::LOW  ) { q = Core::Settings::Quality(q - 1); }
                 if (key == cRight && q < Core::Settings::HIGH ) { q = Core::Settings::Quality(q + 1); }
@@ -485,7 +494,10 @@ struct Inventory {
                 }
             }
 
-            if (slot == count -1 && key == cAction) {
+            if (slot == count - 2 && (key == cLeft || key == cRight)) // stereo
+                settings.detail.stereo = !settings.detail.stereo;
+
+            if (slot == count - 1 && key == cAction) { // apply
                 game->applySettings(settings);
                 chosen = false;
             }
@@ -514,7 +526,7 @@ struct Inventory {
         }
 
         if (item->type == TR::Entity::INV_HOME && phaseChoose == 1.0f && key == cAction) {
-            nextLevel = TR::GYM;
+            nextLevel = TR::LVL_TR1_GYM;
             toggle();
         }
 
@@ -650,7 +662,7 @@ struct Inventory {
             }
         }
 
-        if (!isActive() && nextLevel != TR::LEVEL_MAX)
+        if (!isActive() && nextLevel != TR::LVL_MAX)
             game->loadLevel(nextLevel);
     }
 
@@ -673,7 +685,7 @@ struct Inventory {
     }
 
     bool canFlipPage(int dir) {
-        if (((Character*)game->getLara())->health <= 0.0f)
+        if (game->getLevel()->isTitle() || ((Character*)game->getLara())->health <= 0.0f)
             return false;
         if (dir == -1) return page < PAGE_ITEMS  && getItemsCount(page + 1);
         if (dir ==  1) return page > PAGE_OPTION && getItemsCount(page - 1);
@@ -734,13 +746,16 @@ struct Inventory {
     void renderPassport(Item *item) {
         if (item->anim->dir != 0.0f) return; // check for "Load Game" page
 
-        float y = 120.0f;
+        float eye = UI::width * Core::eye * 0.02f;
         float h = 20.0f;
         float w = 320.0f;
 
+        float x = (UI::width - w) * 0.5f - eye;
+        float y = 120.0f;
+
         StringID str = STR_LOAD_GAME;
 
-        if (game->getLevel()->id == TR::TITLE) {
+        if (game->getLevel()->isTitle()) {
             if (item->value == 1) str = STR_START_GAME;
             if (item->value == 2) str = STR_EXIT_GAME;
         } else {
@@ -757,19 +772,19 @@ struct Inventory {
         if (item->value != 0) return;
 
     // background
-        UI::renderBar(UI::BAR_OPTION, vec2((UI::width - w - 16.0f) * 0.5f, y - 16.0f), vec2(w + 16.0f, h * 16.0f), 0.0f, 0, 0xC0000000);
+        UI::renderBar(UI::BAR_OPTION, vec2(x - 8.0f, y - 16.0f), vec2(w + 16.0f, h * 16.0f), 0.0f, 0, 0xC0000000);
     // title
-        UI::renderBar(UI::BAR_OPTION, vec2((UI::width - w) * 0.5f, y - h + 6), vec2(w, h - 6), 1.0f, 0x802288FF, 0, 0, 0);
-        UI::textOut(vec2(0, y), STR_SELECT_LEVEL, UI::aCenter, UI::width);
+        UI::renderBar(UI::BAR_OPTION, vec2(x, y - h + 6), vec2(w, h - 6), 1.0f, 0x802288FF, 0, 0, 0);
+        UI::textOut(vec2(x, y), STR_SELECT_LEVEL, UI::aCenter, w);
 
         y += h * 2;
-        UI::renderBar(UI::BAR_OPTION, vec2((UI::width - w) * 0.5f, y + slot * h + 6 - h), vec2(w, h - 6), 1.0f, 0xFFD8377C, 0);
+        UI::renderBar(UI::BAR_OPTION, vec2(x, y + slot * h + 6 - h), vec2(w, h - 6), 1.0f, 0xFFD8377C, 0);
 
         for (int i = 0; i < passportSlotCount; i++)
-            if (passportSlots[i] == TR::LEVEL_MAX)
-                UI::textOut(vec2(0, y + i * h), STR_AUTOSAVE, UI::aCenter, UI::width);
+            if (passportSlots[i] == TR::LVL_MAX)
+                UI::textOut(vec2(x, y + i * h), STR_AUTOSAVE, UI::aCenter, w);
             else
-                UI::textOut(vec2(0, y + i * h), TR::LEVEL_INFO[passportSlots[i]].title, UI::aCenter, UI::width);
+                UI::textOut(vec2(x, y + i * h), TR::LEVEL_INFO[passportSlots[i]].title, UI::aCenter, w);
     }
 
     float printBool(float x, float y, float w, StringID oStr, bool active, bool value) {
@@ -812,25 +827,27 @@ struct Inventory {
         float w = 320.0f;
         float h = 20.0f;
 
-        float x = (UI::width - w) * 0.5f;
-        float y = 192.0f;
+        float eye = UI::width * Core::eye * 0.02f;
+        float x = (UI::width - w) * 0.5f - eye;
+        float y = 192.0f - h;
         
     // background
-        UI::renderBar(UI::BAR_OPTION, vec2(x, y - 16.0f), vec2(w, h * 8.0f + 8.0f), 0.0f, 0, 0xC0000000);
+        UI::renderBar(UI::BAR_OPTION, vec2(x, y - 16.0f), vec2(w, h * 9.0f + 8.0f), 0.0f, 0, 0xC0000000);
     // title
         UI::renderBar(UI::BAR_OPTION, vec2(x, y - h + 6), vec2(w, h - 6), 1.0f, 0x802288FF, 0, 0, 0);
-        UI::textOut(vec2(0, y), STR_SELECT_DETAIL, UI::aCenter, UI::width);
+        UI::textOut(vec2(x, y), STR_SELECT_DETAIL, UI::aCenter, w);
 
         y += h * 2;
         x += 8.0f;
         w -= 16.0f;
-        float aw = slot == 4 ? (w - 128.0f) : w;
+        float aw = slot == 5 ? (w - 128.0f) : w;
         
-        UI::renderBar(UI::BAR_OPTION, vec2((UI::width - aw) * 0.5f, y + (slot > 3 ? 5 : slot) * h + 6 - h), vec2(aw, h - 6), 1.0f, 0xFFD8377C, 0);
+        UI::renderBar(UI::BAR_OPTION, vec2((UI::width - aw) * 0.5f - eye, y + (slot > 4 ? 6 : slot) * h + 6 - h), vec2(aw, h - 6), 1.0f, 0xFFD8377C, 0);
         y = printQuality(x, y, w, STR_OPT_DETAIL_FILTER,   slot == 0, settings.detail.filter);
         y = printQuality(x, y, w, STR_OPT_DETAIL_LIGHTING, slot == 1, settings.detail.lighting);
         y = printQuality(x, y, w, STR_OPT_DETAIL_SHADOWS,  slot == 2, settings.detail.shadows);
         y = printQuality(x, y, w, STR_OPT_DETAIL_WATER,    slot == 3, settings.detail.water);
+        y = printBool(x + 32.0f, y, w - 64.0f - 16.0f, STR_OPT_DETAIL_STEREO,  slot == 4, settings.detail.stereo);
         y += h;
         UI::textOut(vec2(x + 64.0f, y), STR_APPLY, UI::aCenter, w - 128.0f);
     }
@@ -839,26 +856,27 @@ struct Inventory {
         float w = 320.0f;
         float h = 20.0f;
 
-        float x = (UI::width - w) * 0.5f;
+        float eye = UI::width * Core::eye * 0.02f;
+        float x = (UI::width - w) * 0.5f - eye;
         float y = 192.0f;
         
     // background
         UI::renderBar(UI::BAR_OPTION, vec2(x, y - 16.0f), vec2(w, h * 5.0f + 8.0f), 0.0f, 0, 0xC0000000);
     // title
         UI::renderBar(UI::BAR_OPTION, vec2(x, y - h + 6), vec2(w, h - 6), 1.0f, 0x802288FF, 0, 0, 0);
-        UI::textOut(vec2(0, y), STR_SET_VOLUMES, UI::aCenter, UI::width);
+        UI::textOut(vec2(x, y), STR_SET_VOLUMES, UI::aCenter, w);
 
         y += h * 2;
         x += 8.0f;
         w -= 16.0f;
 
-        UI::renderBar(UI::BAR_OPTION, vec2((UI::width - w) * 0.5f, y + slot * h + 6 - h), vec2(w, h - 6), 1.0f, 0xFFD8377C, 0);
+        UI::renderBar(UI::BAR_OPTION, vec2((UI::width - w) * 0.5f - eye, y + slot * h + 6 - h), vec2(w, h - 6), 1.0f, 0xFFD8377C, 0);
 
         float aw = w - 64.0f;
         aw -= 4.0f;
  
-        y = printBar((UI::width - w) * 0.5f, y, w, 0xFF0080FF, 101, slot == 0, Core::settings.audio.music);
-        y = printBar((UI::width - w) * 0.5f, y, w, 0xFFFF8000, 102, slot == 1, Core::settings.audio.sound);
+        y = printBar((UI::width - w) * 0.5f - eye, y, w, 0xFF0080FF, 101, slot == 0, Core::settings.audio.music);
+        y = printBar((UI::width - w) * 0.5f - eye, y, w, 0xFFFF8000, 102, slot == 1, Core::settings.audio.sound);
         y = printBool(x + 32.0f, y, w - 64.0f, STR_REVERBERATION, slot == 2, Core::settings.audio.reverb);
     }
 
@@ -979,7 +997,7 @@ struct Inventory {
         Core::mLightProj.identity();
 
         Core::mView.identity();
-        Core::mView.translate(vec3(0, 0, -1286));   // y = -96 in title 
+        Core::mView.translate(vec3(-Core::eye * 8.0f, 0, -1286));   // y = -96 in title 
 
         Core::mView.up  *= -1.0f;
         Core::mView.dir *= -1.0f;
@@ -1017,7 +1035,7 @@ struct Inventory {
 
         static const StringID pageTitle[PAGE_MAX] = { STR_OPTION, STR_INVENTORY, STR_ITEMS };
 
-        if (game->getLevel()->id != TR::TITLE)
+        if (!game->getLevel()->isTitle())
             UI::textOut(vec2( 0, 32), pageTitle[page], UI::aCenter, UI::width);
 
         if (canFlipPage(-1)) {

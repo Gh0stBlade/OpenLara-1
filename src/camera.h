@@ -39,12 +39,9 @@ struct Camera : ICamera {
     Controller* viewTarget;
     float       speed;
 
-    bool    firstPerson;
-    bool    isVR;
-
-    Camera(IGame *game, Character *owner) : ICamera(), game(game), level(game->getLevel()), owner(owner), frustum(new Frustum()), timer(-1.0f), viewIndex(-1), viewIndexLast(-1), viewTarget(NULL), isVR(false) {
+    Camera(IGame *game, Character *owner) : ICamera(), game(game), level(game->getLevel()), owner(owner), frustum(new Frustum()), timer(-1.0f), viewIndex(-1), viewIndexLast(-1), viewTarget(NULL) {
         changeView(false);
-        if (owner->getEntity().type != TR::Entity::LARA && level->cameraFrames) {
+        if (level->isCutsceneLevel()) {
             state = STATE_CUTSCENE;
             room  = level->entities[level->cutEntity].room;
             timer = 0.0f;
@@ -60,7 +57,7 @@ struct Camera : ICamera {
     }
     
     virtual int getRoomIndex() const {
-        return (level->isFlipped && level->rooms[room].alternateRoom > -1) ? level->rooms[room].alternateRoom : room;
+        return (level->state.flags.flipped && level->rooms[room].alternateRoom > -1) ? level->rooms[room].alternateRoom : room;
     }
 
     virtual void checkRoom() {
@@ -74,7 +71,7 @@ struct Camera : ICamera {
         }
 
         TR::Level::FloorInfo info;
-        level->getFloorInfo(getRoomIndex(), (int)pos.x, (int)pos.y, (int)pos.z, info);
+        owner->getFloorInfo(getRoomIndex(), pos, info);
 
         if (info.roomNext != TR::NO_ROOM)
             room = info.roomNext;
@@ -97,7 +94,7 @@ struct Camera : ICamera {
     }
 
     void updateListener() {
-        Sound::flipped = level->isFlipped;
+        Sound::flipped = level->state.flags.flipped;
         Sound::listener.matrix = mViewInv;
         TR::Room &r = level->rooms[getRoomIndex()];
         int h = (r.info.yBottom - r.info.yTop) / 1024;
@@ -148,10 +145,33 @@ struct Camera : ICamera {
     virtual void doCutscene(const vec3 &pos, float rotation) {
         state = Camera::STATE_CUTSCENE;
         level->cutMatrix.identity();
-        level->cutMatrix.rotateY(angle.y);
+        level->cutMatrix.rotateY(rotation);
         level->cutMatrix.setPos(pos);
         timer = 0.0f;
     }
+
+    bool updateFirstPerson() {
+        if (!firstPerson || viewIndex != -1)
+            return false;
+
+        Basis head = owner->animation.getJoints(owner->getMatrix(), 14, true);
+        Basis eye(quat(0.0f, 0.0f, 0.0f, 1.0f), vec3(0.0f, -40.0f, 10.0f));
+        eye = head * eye;
+        mViewInv.identity();
+
+        //prevBasis = prevBasis.lerp(eye, 15.0f * Core::deltaTime);
+
+        mViewInv.setRot(eye.rot);
+        mViewInv.setPos(eye.pos);
+        mViewInv.rotateY(advAngle.y);
+        mViewInv.rotateX(advAngle.x + PI);
+
+        pos = mViewInv.getPos();
+        checkRoom();
+        updateListener();
+        return true;
+    }
+
 
     virtual void update() {
         if (shake > 0.0f)
@@ -165,13 +185,16 @@ struct Camera : ICamera {
 
             if (indexA == level->cameraFramesCount - 1) {
                 if (level->cutEntity != -1)
-                    game->loadLevel(TR::LevelID(level->id + 1));
+                    game->loadNextLevel();
                 else {
                     Character *lara = (Character*)game->getLara();
                     if (lara->health > 0.0f)
                         state = STATE_FOLLOW;
                 }
             }
+
+            if (updateFirstPerson())
+                return;
 
             TR::CameraFrame *frameA = &level->cameraFrames[indexA];
             TR::CameraFrame *frameB = &level->cameraFrames[indexB];
@@ -230,36 +253,28 @@ struct Camera : ICamera {
                 angle.x -= 60.0f * DEG2RAD;
 
 
-            Controller *lookAt = viewTarget;
-            
+            Controller *lookAt = NULL;
+
             if (state != STATE_STATIC) {
-                if (owner->viewTarget)
-                    owner->lookAt(lookAt = owner->viewTarget);
-                else
-                    owner->lookAt(lookAt = viewTarget);
-            } else 
-                 owner->lookAt(NULL);
+                if (!owner->viewTarget) {
+                    if (viewTarget && !viewTarget->flags.invisible) {
+                        vec3 targetVec = (viewTarget->pos - owner->pos).normal();
+                        if (targetVec.dot(owner->getDir()) > 0.5f)
+                            lookAt = viewTarget;
+                    }
+                } else
+                    lookAt = owner->viewTarget;
+
+                owner->lookAt(lookAt);
+            } else {
+                lookAt = viewTarget;
+                owner->lookAt(NULL);
+            }
 
             vec3 viewPoint = getViewPoint();
 
-            if (firstPerson && viewIndex == -1) {
-                Basis head = owner->animation.getJoints(owner->getMatrix(), 14, true);
-                Basis eye(quat(0.0f, 0.0f, 0.0f, 1.0f), vec3(0.0f, -40.0f, 10.0f));
-                eye = head * eye;
-                mViewInv.identity();
-
-                //prevBasis = prevBasis.lerp(eye, 15.0f * Core::deltaTime);
-
-                mViewInv.setRot(eye.rot);
-                mViewInv.setPos(eye.pos);
-                mViewInv.rotateY(advAngle.y);
-                mViewInv.rotateX(advAngle.x + PI);
-
-                pos = mViewInv.getPos();
-                checkRoom();
-                updateListener();
+            if (updateFirstPerson())
                 return;
-            }
 
             float lerpFactor = lookAt ? 10.0f : 6.0f;
             vec3 dir;
@@ -305,10 +320,12 @@ struct Camera : ICamera {
         }
 
         mViewInv = mat4(pos, target, vec3(0, -1, 0));
-        if (isVR) {
+    /*
+        if (Core::settings.detail.VR) {
             mat4 head = Input::head.getMatrix();
             mViewInv = mViewInv * head;
         }
+    */
         updateListener();
     }
 
@@ -329,8 +346,8 @@ struct Camera : ICamera {
             if (shake > 0.0f)
                 Core::mView.translate(vec3(0.0f, sinf(shake * PI * 7) * shake * 48.0f, 0.0f));
 
-            if (isVR)
-                Core::mView.translate(Core::mViewInv.right.xyz * (-Core::eye * 32.0f));
+            if (Core::settings.detail.stereo)
+                Core::mView.translate(Core::mViewInv.right.xyz * (-Core::eye * (firstPerson ? 8.0f : 32.0f) ));
 
             Core::mProj = getProjMatrix();
 
@@ -356,7 +373,7 @@ struct Camera : ICamera {
 
         fov   = firstPerson ? 90.0f : 65.0f;
         znear = firstPerson ? 8.0f  : 128.0f;
-        zfar  = 40.0f * 1024.0f;
+        zfar  = 40.0f * 1024.0f * 1024.0f;
     }
 };
 

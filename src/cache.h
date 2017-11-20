@@ -173,7 +173,7 @@ struct ShaderCache {
                 break;
             }
             case Core::passFilter  : {
-                static const char *typeNames[] = { "DEFAULT", "DOWNSAMPLE", "GRAYSCALE", "BLUR", "MIXER" };
+                static const char *typeNames[] = { "DEFAULT", "DOWNSAMPLE", "GRAYSCALE", "BLUR", "MIXER", "EQUIRECTANGULAR" };
                 src = FILTER;
                 typ = typeNames[type];
                 sprintf(def, "%s#define PASS_%s\n#define FILTER_%s\n", ext, passNames[pass], typ);
@@ -265,7 +265,7 @@ struct AmbientCache {
 
         Task &task  = tasks[tasksCount++];
         task.room   = room;
-        task.flip   = level->isFlipped;
+        task.flip   = level->state.flags.flipped;
         task.sector = sector;
         task.cube   = &items[offsets[room] + sector];
         task.cube->status = Cube::WAIT;
@@ -317,10 +317,10 @@ struct AmbientCache {
         for (int i = 0; i < tasksCount; i++) {
             Task &task = tasks[i];
             
-            bool oldFlip = level->isFlipped;
-            level->isFlipped = task.flip != 0;
+            bool oldFlip = level->state.flags.flipped;
+            level->state.flags.flipped = task.flip != 0;
             renderAmbient(task.room, task.sector, &task.cube->colors[0]);
-            level->isFlipped = oldFlip;
+            level->state.flags.flipped = oldFlip;
 
             task.cube->status = Cube::READY;
         }
@@ -369,6 +369,9 @@ struct WaterCache {
         vec3    pos, size;
         Texture *mask;
         Texture *caustics;
+    #ifdef BLUR_CAUSTICS
+        Texture *caustics_tmp;
+    #endif
         Texture *data[2];
 
         Item() {
@@ -380,7 +383,6 @@ struct WaterCache {
         }
 
         void init(IGame *game) {
-
             TR::Level *level = game->getLevel();
             TR::Room &r = level->rooms[to]; // underwater room
 
@@ -412,20 +414,14 @@ struct WaterCache {
                 for (int x = minX; x < maxX; x++) {
                     TR::Room::Sector &s = r.sectors[x * r.zSectors + z];
 
-                    bool hasWater = (s.roomAbove != TR::NO_ROOM && !level->rooms[s.roomAbove].flags.water);
-                    bool hasFlow  = false;
+                    bool hasWater = s.roomAbove != TR::NO_ROOM && !level->rooms[s.roomAbove].flags.water;
                     if (hasWater) {
-                        TR::Level::FloorInfo info;
-                        level->getFloorInfo(to, x + r.info.x, r.info.yBottom, z + r.info.z, info);
-                        if (info.trigCmdCount && info.trigger == TR::Level::Trigger::ACTIVATE)
-                            for (int i = 0; i < info.trigCmdCount; i++)
-                                if (info.trigCmd[i].action == TR::Action::FLOW) {
-                                    hasFlow = true;
-                                    break;
-                                }
+                        TR::Room &rt = level->rooms[s.roomAbove];
+                        TR::Room::Sector &st = rt.sectors[x * rt.zSectors + z];
+                        hasWater = s.ceiling > st.ceiling;
                     }
-                        
-                    m[(x - minX) + w * (z - minZ)] = hasWater ? (hasFlow ? 0xF81F : 0xF800) : 0;
+
+                    m[(x - minX) + w * (z - minZ)] = hasWater ? 0xF800 : 0;
                 }
 
             size = vec3(float((maxX - minX) * 512), 1.0f, float((maxZ - minZ) * 512)); // half size
@@ -434,6 +430,9 @@ struct WaterCache {
             data[0]  = new Texture(w * 64, h * 64, Texture::RGBA_HALF);
             data[1]  = new Texture(w * 64, h * 64, Texture::RGBA_HALF);
             caustics = Core::settings.detail.water > Core::Settings::MEDIUM ? new Texture(512, 512, Texture::RGBA) : NULL;
+            #ifdef BLUR_CAUSTICS
+                caustics_tmp = Core::settings.detail.water > Core::Settings::MEDIUM ? new Texture(512, 512, Texture::RGBA) : NULL;
+            #endif
             mask     = new Texture(w, h, Texture::RGB16, false, m, false);
             delete[] m;
             
@@ -445,10 +444,13 @@ struct WaterCache {
             Core::invalidateTarget(false, true);
         }
 
-        void free() {
+        void deinit() {
             delete data[0];
             delete data[1];
             delete caustics;
+        #ifdef BLUR_CAUSTICS
+            delete caustics_tmp;
+        #endif
             delete mask;
             mask = caustics = data[0] = data[1] = NULL;
         }
@@ -473,7 +475,7 @@ struct WaterCache {
         delete refract;
         delete reflect;
         for (int i = 0; i < count; i++)
-            items[i].free();
+            items[i].deinit();
     }
 
     void update() {
@@ -481,7 +483,7 @@ struct WaterCache {
         while (i < count) {
             Item &item = items[i];
             if (item.timer > MAX_INVISIBLE_TIME) {
-                items[i].free();
+                items[i].deinit();
                 items[i] = items[--count];
                 continue;
             }
@@ -614,6 +616,23 @@ struct WaterCache {
         Core::setTarget(item.caustics, true);
         game->getMesh()->renderPlane();
         Core::invalidateTarget(false, true);
+    #ifdef BLUR_CAUSTICS
+        // v blur
+        Core::setTarget(item.caustics_tmp, true);
+        game->setShader(Core::passFilter, Shader::FILTER_BLUR, false, false);
+        Core::active.shader->setParam(uParam, vec4(0, 1, 1.0f / item.caustics->width, 0));;
+        item.caustics->bind(sDiffuse);
+        game->getMesh()->renderQuad();
+        Core::invalidateTarget(false, true);
+
+        // h blur
+        Core::setTarget(item.caustics, true);
+        game->setShader(Core::passFilter, Shader::FILTER_BLUR, false, false);
+        Core::active.shader->setParam(uParam, vec4(1, 0, 1.0f / item.caustics->width, 0));;
+        item.caustics_tmp->bind(sDiffuse);
+        game->getMesh()->renderQuad();
+        Core::invalidateTarget(false, true);
+    #endif
     }
 
     void renderMask() {
@@ -665,7 +684,7 @@ struct WaterCache {
             Core::invalidateTarget(false, true);
             Core::setTarget(NULL);
         }
-        Core::copyTarget(refract, 0, 0, 0, 0, w, h); // copy framebuffer into refraction texture
+        Core::copyTarget(refract, 0, 0, int(Core::viewportDef.x), int(Core::viewportDef.y), w, h); // copy framebuffer into refraction texture
     }
 
     void simulate() {
@@ -703,6 +722,10 @@ struct WaterCache {
         Camera *camera = (Camera*)game->getCamera();
         game->setupBinding();
 
+        mat4 mProj     = Core::mProj;
+        mat4 mView     = Core::mView;
+        mat4 mViewInv  = Core::mViewInv;
+
         for (int i = 0; i < count; i++) {
             Item &item = items[i];
             if (!item.visible) continue;
@@ -725,8 +748,12 @@ struct WaterCache {
         Core::invalidateTarget(false, true);
         game->setClipParams(1.0f, NO_CLIP_PLANE);
 
+        Core::mProj     = mProj;
+        Core::mView     = mView;
+        Core::mViewInv  = mViewInv;
+
         camera->reflectPlane = NULL;
-        camera->setup(true);
+        camera->setup(false);
     }
 
     void render() {
@@ -752,8 +779,10 @@ struct WaterCache {
 
             refract->bind(sDiffuse);
             reflect->bind(sReflect);
+            item.mask->bind(sMask);
             item.data[0]->bind(sNormal);
             Core::setCulling(cfNone);
+            Core::setBlending(bmAlpha);
             #ifdef WATER_USE_GRID
                 vec3 rPosScale[2] = { item.pos, item.size * vec3(1.0f / PLANE_DETAIL, 512.0f, 1.0f / PLANE_DETAIL) };
                 Core::active.shader->setParam(uPosScale, rPosScale[0], 2);
@@ -763,6 +792,7 @@ struct WaterCache {
                 game->getMesh()->renderQuad();
             #endif
             Core::setCulling(cfFront);
+            Core::setBlending(bmNone);
         }
         dropCount = 0;
     }

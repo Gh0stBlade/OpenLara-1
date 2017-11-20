@@ -186,14 +186,17 @@ namespace Core {
     struct Settings {
         enum Quality : uint8 { LOW, MEDIUM, HIGH };
 
-        union {
-            struct {
-                Quality filter;
-                Quality lighting;
-                Quality shadows;
-                Quality water;
+        struct {
+            union {
+                struct {
+                    Quality filter;
+                    Quality lighting;
+                    Quality shadows;
+                    Quality water;
+                };
+                Quality quality[4];
             };
-            Quality quality[4];
+            bool stereo;
 
             void setFilter(Quality value) {
                 if (value > MEDIUM && !(support.maxAniso > 1))
@@ -448,7 +451,7 @@ namespace Core {
     mat4 mView, mProj, mViewProj, mViewInv, mLightProj;
     Basis basis;
     vec3 viewPos;
-    vec3 lightPos[MAX_LIGHTS];
+    vec4 lightPos[MAX_LIGHTS];
     vec4 lightColor[MAX_LIGHTS];
     vec4 params;
     vec4 contacts[MAX_CONTACTS];
@@ -686,8 +689,9 @@ namespace Core {
     // init settings
         settings.detail.setFilter   (Core::Settings::HIGH);
         settings.detail.setLighting (Core::Settings::HIGH);
-        settings.detail.setShadows  (Core::Settings::MEDIUM);
+        settings.detail.setShadows  (Core::Settings::HIGH);
         settings.detail.setWater    (Core::Settings::HIGH);
+        settings.detail.stereo        = false;
 
         settings.audio.music          = 0.7f;
         settings.audio.sound          = 0.7f;
@@ -720,7 +724,7 @@ namespace Core {
 #endif
     }
 
-    void free() {
+    void deinit() {
         delete blackTex;
         delete whiteTex;
     /*
@@ -732,7 +736,7 @@ namespace Core {
             for (int i = 0; i < rtCache[b].count; i++)
                 glDeleteRenderBuffers(1, &rtCache[b].items[i].ID);
     */
-        Sound::free();
+        Sound::deinit();
     }
 
     int cacheRenderTarget(bool depth, int width, int height) {

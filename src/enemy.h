@@ -77,17 +77,26 @@ struct Enemy : Character {
         delete path;
     }
 
+    virtual void getSaveData(TR::SaveGame::Entity &data) {
+        Character::getSaveData(data);
+        data.extraSize = sizeof(data.extra.enemy);
+        data.extra.enemy.health = uint16(health);
+        data.extra.enemy.mood   = uint16(mood);
+    }
+
+    virtual void setSaveData(const TR::SaveGame::Entity &data) {
+        Character::setSaveData(data);
+        health = float(data.extra.enemy.health);
+        mood   = Mood(data.extra.enemy.mood);
+    }
+
     virtual bool activate() {
-        if (health > 0.0f && Character::activate()) {
-            target = (Character*)game->getLara();
-            return true;
-        }
-        return false;
+        return health > 0.0f && Character::activate();
     }
 
     virtual void updateVelocity() {
         if (stand == STAND_AIR && (!flying || health <= 0.0f))
-            velocity.y += GRAVITY * Core::deltaTime;
+            applyGravity(velocity.y);
         else
             velocity = getDir() * animation.getSpeed();
 
@@ -136,18 +145,18 @@ struct Enemy : Character {
     }
 
     virtual void updatePosition() {
-        if (!getEntity().flags.active) return;
+        if (!flags.active) return;
 
         vec3 p = pos;
-        pos += velocity * Core::deltaTime * 30.0f;
+        pos += velocity * (30.0f * Core::deltaTime);
 
         clipByBox(pos);
 
         TR::Level::FloorInfo info;
-        level->getFloorInfo(getRoomIndex(), int(pos.x), int(pos.y), int(pos.z), info);
+        getFloorInfo(getRoomIndex(), pos, info);
         if (stand == STAND_AIR && !flying && info.floor < pos.y) {
             stand = STAND_GROUND;
-            pos.y = float(info.floor);
+            pos.y = info.floor;
         }
 
         if (info.boxIndex != 0xFFFF && zone == getZones()[info.boxIndex] && !level->boxes[info.boxIndex].overlap.block) {
@@ -158,14 +167,13 @@ struct Enemy : Character {
                     break;
                 }
                 case STAND_AIR    : 
-                    pos.y = clamp(pos.y, float(info.ceiling), float(info.floor));
+                    pos.y = clamp(pos.y, info.ceiling, info.floor);
                     break;
                 default : ;
             }
         } else
             pos = p;
 
-        updateEntity();
         checkRoom();
     }
 
@@ -223,7 +231,6 @@ struct Enemy : Character {
         speed *= Core::deltaTime;
         decrease(delta, pos.y, speed);
         if (speed != 0.0f) {
-            updateEntity();
             return speed < 0 ? FORTH : BACK;
         }
         return 0;
@@ -239,7 +246,7 @@ struct Enemy : Character {
     void bite(const vec3 &pos, float damage) {
         ASSERT(target);
         target->hit(damage, this);
-        Sprite::add(game, TR::Entity::BLOOD, target->getRoomIndex(), (int)pos.x, (int)pos.y, (int)pos.z, Sprite::FRAME_ANIMATED);
+        game->addEntity(TR::Entity::BLOOD, target->getRoomIndex(), pos);
     }
 
     #define STALK_BOX       (1024 * 3)
@@ -280,6 +287,9 @@ struct Enemy : Character {
     }
     
     bool think(bool fixedLogic) {
+        if (!target)
+            target = (Character*)game->getLara();
+
         thinkTime += Core::deltaTime;
         if (thinkTime < 1.0f / 30.0f)
             return false;
@@ -398,9 +408,8 @@ struct Enemy : Character {
         if (zone != getZones()[box])
             return false;
 
-        TR::Entity &e = getEntity();
         TR::Box    &b = game->getLevel()->boxes[box];
-        TR::Entity::Type type = e.type;
+        TR::Entity::Type type = getEntity().type;
 
         if (b.overlap.block)
             return false;
@@ -412,17 +421,16 @@ struct Enemy : Character {
             if (b.overlap.block)
                 return false;
 
-        return e.x < int(b.minX) || e.x > int(b.maxX) || e.z < int(b.minZ) || e.z > int(b.maxZ);
+        return int(pos.x) < int(b.minX) || int(pos.x) > int(b.maxX) || int(pos.z) < int(b.minZ) || int(pos.z) > int(b.maxZ);
     }
 
     bool isStalkBox(int box) {
-        TR::Entity &t = target->getEntity();
         TR::Box    &b = game->getLevel()->boxes[box];
 
-        int x = (b.minX + b.maxX) / 2 - t.x;
+        int x = (b.minX + b.maxX) / 2 - int(target->pos.x);
         if (abs(x) > STALK_BOX) return false;
 
-        int z = (b.minZ + b.maxZ) / 2 - t.z;
+        int z = (b.minZ + b.maxZ) / 2 - int(target->pos.z);
         if (abs(z) > STALK_BOX) return false;
 
         // TODO: check for some quadrant shit
@@ -431,17 +439,15 @@ struct Enemy : Character {
     }
 
     bool isEscapeBox(int box) {
-        TR::Entity &e = getEntity();
-        TR::Entity &t = target->getEntity();
         TR::Box    &b = game->getLevel()->boxes[box];
 
-        int x = (b.minX + b.maxX) / 2 - t.x;
+        int x = (b.minX + b.maxX) / 2 - int(target->pos.x);
         if (abs(x) < ESCAPE_BOX) return false;
 
-        int z = (b.minZ + b.maxZ) / 2 - t.z;
+        int z = (b.minZ + b.maxZ) / 2 - int(target->pos.z);
         if (abs(z) < ESCAPE_BOX) return false;
 
-        return !((e.x > t.x) ^ (x > 0)) || !((e.z > t.z) ^ (z > 0));
+        return !((pos.x > target->pos.x) ^ (x > 0)) || !((pos.z > target->pos.z) ^ (z > 0));
     }
 
     bool findPath(int ascend, int descend, bool big) {
@@ -506,8 +512,7 @@ struct Wolf : Enemy {
     }
 
     virtual int getStateGround() {
-        TR::Entity &e = getEntity();
-        if (!e.flags.active)
+        if (!flags.active)
             return (state == STATE_STOP || state == STATE_SLEEP) ? STATE_SLEEP : STATE_STOP;
 
         if (!think(false))
@@ -672,7 +677,7 @@ struct Bear : Enemy {
     }
 
     virtual int getStateGround() {
-        if (!getEntity().flags.active)
+        if (!flags.active)
             return state;
 
         if (!think(true))
@@ -808,7 +813,7 @@ struct Bat : Enemy {
     }
 
     virtual int getStateAir() {
-        if (!getEntity().flags.active) {
+        if (!flags.active) {
             animation.time = 0.0f;
             animation.dir  = 0.0f;
             return STATE_AWAKE;
@@ -850,6 +855,17 @@ struct Bat : Enemy {
             lift(waypoint.y - pos.y, BAT_LIFT_SPEED);
         Enemy::updatePosition();
     }
+
+    virtual void deactivate(bool removeFromList = false) {
+        if (health <= 0.0f) {
+            TR::Level::FloorInfo info;
+            getFloorInfo(getRoomIndex(), pos, info);
+            if (info.floor > pos.y)
+                return;
+            pos.y = info.floor;
+        }
+        Enemy::deactivate(removeFromList);
+    }
 };
 
 
@@ -885,7 +901,7 @@ struct Rex : Enemy {
     }
 
     virtual int getStateGround() {
-        if (!getEntity().flags.active)
+        if (!flags.active)
             return state;
 
         if (!think(true))
@@ -1004,7 +1020,7 @@ struct Raptor : Enemy {
     }
 
     virtual int getStateGround() {
-        if (!getEntity().flags.active)
+        if (!flags.active)
             return state;
 
         if (!think(true))
@@ -1087,8 +1103,7 @@ struct Raptor : Enemy {
 
 struct Mutant : Enemy {
     Mutant(IGame *game, int entity) : Enemy(game, entity, 50, 341, 150.0f, 1.0f) {
-        TR::Entity &e = getEntity();
-        if (e.type != TR::Entity::ENEMY_MUTANT_1) {
+        if (getEntity().type != TR::Entity::ENEMY_MUTANT_1) {
             initMeshOverrides();
             layers[0].mask = 0xffe07fff;
             aggression     = 0.25f;
@@ -1111,7 +1126,7 @@ struct Mutant : Enemy {
 
         if (exploded && !explodeMask) {
             deactivate(true);
-            getEntity().flags.invisible = true;
+            flags.invisible = true;
         }
     }
 
@@ -1176,7 +1191,7 @@ struct GiantMutant : Enemy {
         if (exploded && !explodeMask) {
             game->checkTrigger(this, true);
             deactivate(true);
-            getEntity().flags.invisible = true;
+            flags.invisible = true;
         }
     }
 };
@@ -1235,14 +1250,60 @@ struct Mummy : Enemy {
 };
 
 
+#define DOPPELGANGER_ROOM_CENTER (vec3(36, 0, 60) * 1024.0f)
+
 struct Doppelganger : Enemy {
+    enum {
+        ANIM_FALL = 34,
+    };
+
     Doppelganger(IGame *game, int entity) : Enemy(game, entity, 1000, 341, 150.0f, 0.0f) {
-        jointChest = 1;
-        jointHead  = 2;
+        jointChest = 7;
+        jointHead  = 14;
     }
 
+    virtual void hit(float damage, Controller *enemy = NULL, TR::HitType hitType = TR::HIT_DEFAULT) {
+        Character *lara = (Character*)game->getLara();
+        lara->hit(damage * 10, this);
+    };
+
     virtual void update() {
-        Enemy::update();
+        Character *lara = (Character*)game->getLara();
+
+        if (stand != STAND_AIR) {
+            pos      = DOPPELGANGER_ROOM_CENTER * 2.0f - lara->pos;
+            pos.y    = lara->pos.y;
+            angle    = lara->angle;
+            angle.y -= PI;
+        }
+
+        Enemy::checkRoom();
+
+        TR::Level::FloorInfo info;
+        getFloorInfo(getRoomIndex(), pos, info);
+
+        if (stand != STAND_AIR && lara->stand == Character::STAND_GROUND && pos.y < info.floor - 1024) {
+            animation = Animation(level, lara->getModel());
+            animation.setAnim(ANIM_FALL, 1);
+            stand = STAND_AIR;
+            velocity.x = velocity.y = 0.0f;
+        }
+
+        if (stand == STAND_AIR) {
+            if (pos.y > info.floor) {
+                game->checkTrigger(this, true);
+                flags.invisible = true;
+                deactivate(true);
+            } else {
+                updateAnimation(true);
+                applyGravity(velocity.y);
+                pos += velocity * (30.0f * Core::deltaTime);
+            }
+        } else {
+            animation.frameA = lara->animation.frameA;
+            animation.frameB = lara->animation.frameB;
+            animation.delta  = lara->animation.delta;
+        }
     }
 
     virtual int getStateGround() {
@@ -1269,7 +1330,7 @@ struct ScionTarget : Enemy {
 
         if (health <= 0.0f) {
             if (timer == 0.0f) {
-                getEntity().flags.invisible = true;
+                flags.invisible = true;
                 game->checkTrigger(this, true);
                 timer = 3.0f;
             }
@@ -1280,8 +1341,7 @@ struct ScionTarget : Enemy {
 
                 if (index != int(timer / 0.3f)) {
                     vec3 p = pos + vec3((randf() * 2.0f - 1.0f) * 512.0f, (randf() * 2.0f - 1.0f) * 64.0f - 500.0f, (randf() * 2.0f - 1.0f) * 512.0f);
-                    game->addSprite(TR::Entity::EXPLOSION, getRoomIndex(), int(p.x), int(p.y), int(p.z));
-                    game->playSound(TR::SND_EXPLOSION, pos, 0);
+                    game->addEntity(TR::Entity::EXPLOSION, getRoomIndex(), p);
                     game->getCamera()->shake = 0.5f;
                 }
 
@@ -1353,10 +1413,10 @@ struct Pierre : Human {
     }
 
     virtual void onDead() {
-        if (level->id == TR::LEVEL_7B) {
-            game->addEntity(TR::Entity::MAGNUMS,    getRoomIndex(), pos, 0);
-            game->addEntity(TR::Entity::SCION_DROP, getRoomIndex(), pos, 0);
-            game->addEntity(TR::Entity::KEY_ITEM_1, getRoomIndex(), pos, 0);
+        if (level->id == TR::LVL_TR1_7B) {
+            game->addEntity(TR::Entity::MAGNUMS,           getRoomIndex(), pos, 0);
+            game->addEntity(TR::Entity::SCION_PICKUP_DROP, getRoomIndex(), pos, 0);
+            game->addEntity(TR::Entity::KEY_ITEM_1,        getRoomIndex(), pos, 0);
         }
     }
 };

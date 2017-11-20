@@ -53,7 +53,7 @@ typedef unsigned char   uint8;
 typedef unsigned short  uint16;
 typedef unsigned int    uint32;
 
-#define FOURCC(str)     (*((uint32*)str))
+#define FOURCC(str)     (((uint8*)(str))[0] | (((uint8*)(str))[1] << 8) | (((uint8*)(str))[2] << 16) | (((uint8*)(str))[3] << 24) )
 
 #define COUNT(arr)      (sizeof(arr) / sizeof(arr[0]))
 
@@ -251,6 +251,10 @@ struct vec3 {
     vec3  normal()  const { float s = length(); return s == 0.0f ? (*this) : (*this)*(1.0f/s); }
     vec3  axisXZ()  const { return (fabsf(x) > fabsf(z)) ? vec3(float(sign(x)), 0, 0) : vec3(0, 0, float(sign(z))); }
 
+    vec3 reflect(const vec3 &n) const {
+        return *this - n * (dot(n) * 2.0f);
+    }
+
     vec3 lerp(const vec3 &v, const float t) const {
         if (t <= 0.0f) return *this;
         if (t >= 1.0f) return v;
@@ -279,6 +283,7 @@ struct vec4 {
     vec4() {}
     vec4(float s) : x(s), y(s), z(s), w(s) {}
     vec4(float x, float y, float z, float w) : x(x), y(y), z(z), w(w) {}
+    vec4(const vec3 &xyz) : x(xyz.x), y(xyz.y), z(xyz.z), w(0) {}
     vec4(const vec3 &xyz, float w) : x(xyz.x), y(xyz.y), z(xyz.z), w(w) {}
     vec4(const vec2 &xy, const vec2 &zw) : x(xy.x), y(xy.y), z(zw.x), w(zw.y) {}
 

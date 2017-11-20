@@ -57,9 +57,9 @@ struct Shader {
     enum Type : GLint { 
         DEFAULT = 0,
         /* shader */ SPRITE = 0, FLASH = 1, ROOM = 2, ENTITY = 3, MIRROR = 4, 
-        /* filter */ FILTER_DOWNSAMPLE = 1, FILTER_GRAYSCALE = 2, FILTER_BLUR = 3, FILTER_MIXER = 4,
+        /* filter */ FILTER_DOWNSAMPLE = 1, FILTER_GRAYSCALE = 2, FILTER_BLUR = 3, FILTER_MIXER = 4, FILTER_EQUIRECTANGULAR = 5,
         /* water  */ WATER_DROP = 0, WATER_STEP = 1, WATER_CAUSTICS = 2, WATER_MASK = 3, WATER_COMPOSE = 4,
-        MAX = 5
+        MAX = 6
     };
 
     Shader(const char *source, const char *defines = "") {
@@ -159,8 +159,11 @@ struct Shader {
 
     void init() {
         bind();
-        for (int st = 0; st < sMAX; st++)
-            glUniform1iv(glGetUniformLocation(ID, (GLchar*)SamplerName[st]), 1, &st);
+        for (int st = 0; st < sMAX; st++) {
+            GLint idx = glGetUniformLocation(ID, (GLchar*)SamplerName[st]);
+            if (idx != -1)
+                glUniform1iv(idx, 1, &st);
+        }
 
         for (int ut = 0; ut < uMAX; ut++)
             uID[ut] = glGetUniformLocation(ID, (GLchar*)UniformName[ut]);

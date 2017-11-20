@@ -43,6 +43,7 @@ enum StringID {
     , STR_OPT_DETAIL_LIGHTING
     , STR_OPT_DETAIL_SHADOWS
     , STR_OPT_DETAIL_WATER
+    , STR_OPT_DETAIL_STEREO
 // sound options
     , STR_SET_VOLUMES
     , STR_REVERBERATION
@@ -132,6 +133,7 @@ const char *STR[STR_MAX] = {
     , "Lighting"
     , "Shadows"
     , "Water"
+    , "Stereo"
 // sound options
     , "Set Volumes"
     , "Reverberation"
@@ -256,7 +258,7 @@ namespace UI {
         TR::Level *level = game->getLevel();
         MeshBuilder *mesh = game->getMesh();
 
-        int seq = level->extra.glyphSeq;
+        int seq = level->extra.glyphs;
 
         int x = int(pos.x);
         int y = int(pos.y);
@@ -301,7 +303,7 @@ namespace UI {
         TR::Level *level = game->getLevel();
         MeshBuilder *mesh = game->getMesh();
 
-        int seq = level->extra.glyphSeq;
+        int seq = level->extra.glyphs;
 
         if (buffer.iCount == MAX_CHARS * 6)
             flush();
@@ -333,7 +335,7 @@ namespace UI {
 //        texAction = loadRAW(64, 64, "btn_action.raw");
     }
 
-    void free() {
+    void deinit() {
 //        delete texInv;
 //        delete texAction;
     }

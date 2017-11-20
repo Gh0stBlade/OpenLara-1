@@ -54,11 +54,11 @@ namespace Game {
         init(new Stream(lvlName));
     }
 
-    void free() {
+    void deinit() {
         delete level;
-        UI::free();
+        UI::deinit();
         delete shaderCache;
-        Core::free();
+        Core::deinit();
     }
 
     void updateTick() {
@@ -93,6 +93,17 @@ namespace Game {
                 level->camera->changeView(!level->camera->firstPerson);
                 Input::down[ikV] = false;
             }
+        }
+
+        if (Input::down[ikS]) {
+            if (level->lara->canSaveGame())
+                level->saveGame(0);
+            Input::down[ikS] = false;
+        }
+
+        if (Input::down[ikL]) {
+            level->loadGame(0);
+            Input::down[ikL] = false;
         }
 
         Core::deltaTime = delta = min(0.2f, delta);
