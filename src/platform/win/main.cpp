@@ -7,16 +7,100 @@
 
 #ifdef MINIMAL
     #if _MSC_VER >= 1900 // VS2015 (1900) VS2017 (1910)
+        #define _NO_CRT_STDIO_INLINE
         #include <malloc.h>
         void __cdecl operator delete(void *ptr, unsigned int size) { free(ptr); }
         // add "/d2noftol3" to compiler additional options
-        // add define _NO_CRT_STDIO_INLINE
     #endif
+#endif
+
+//#define VR_SUPPORT
+// TODO: fix depth precision
+// TODO: fix water surface rendering
+// TODO: fix clipping
+// TODO: add MSAA support for render targets
+// TODO: add IK for arms
+// TODO: controls
+
+#ifdef VR_SUPPORT
+   #include "libs/openvr/openvr.h"
 #endif
 
 #include "game.h"
 
-int getTime() {
+
+// multi-threading
+void* osMutexInit() {
+    CRITICAL_SECTION *CS = new CRITICAL_SECTION();
+    InitializeCriticalSection(CS);
+    return CS;
+}
+
+void osMutexFree(void *obj) {
+    DeleteCriticalSection((CRITICAL_SECTION*)obj);
+    delete (CRITICAL_SECTION*)obj;
+}
+
+void osMutexLock(void *obj) {
+    EnterCriticalSection((CRITICAL_SECTION*)obj);
+}
+
+void osMutexUnlock(void *obj) {
+    LeaveCriticalSection((CRITICAL_SECTION*)obj);
+}
+
+/*
+void* osMutexInit() {
+    HANDLE *mutex = new HANDLE();
+    *mutex = CreateMutex(NULL, FALSE, NULL);
+    return mutex;
+}
+
+void osMutexFree(void *obj) {
+    CloseHandle(*(HANDLE*)obj);
+    delete (HANDLE*)obj;
+}
+
+void osMutexLock(void *obj) {
+    WaitForSingleObject(*(HANDLE*)obj, INFINITE);
+}
+
+void osMutexUnlock(void *obj) {
+    ReleaseMutex(*(HANDLE*)obj);
+}
+*/
+
+void* osRWLockInit() {
+    SRWLOCK *lock = new SRWLOCK();
+    InitializeSRWLock(lock);
+    return lock;
+}
+
+void osRWLockFree(void *obj) {
+    delete (SRWLOCK*)obj;
+}
+
+void osRWLockRead(void *obj) {
+    AcquireSRWLockShared((SRWLOCK*)obj);
+}
+
+void osRWUnlockRead(void *obj) {
+    ReleaseSRWLockShared((SRWLOCK*)obj);
+}
+
+void osRWLockWrite(void *obj) {
+    AcquireSRWLockExclusive((SRWLOCK*)obj);
+}
+
+void osRWUnlockWrite(void *obj) {
+    ReleaseSRWLockExclusive((SRWLOCK*)obj);
+}
+
+
+// timing
+int osStartTime = 0;
+
+int osGetTime() {
 #ifdef DEBUG
     LARGE_INTEGER Freq, Count;
     QueryPerformanceFrequency(&Freq);
@@ -24,8 +108,16 @@ int getTime() {
     return int(Count.QuadPart * 1000L / Freq.QuadPart);
 #else
     timeBeginPeriod(0);
-    return int(timeGetTime());
+    return int(timeGetTime()) - osStartTime;
 #endif
+}
+
+bool osSave(const char *name, const void *data, int size) {
+    FILE *f = fopen(name, "wb");
+    if (!f) return false;
+    fwrite(data, size, 1, f);
+    fclose(f);
+    return true;
 }
 
 // common input functions
@@ -52,20 +144,18 @@ InputKey mouseToInputKey(int msg) {
 #define JOY_DEAD_ZONE_STICK      0.3f
 #define JOY_DEAD_ZONE_TRIGGER    0.01f
 
-bool joyReady;
+bool joyReady[2];
 
-void joyInit() {
+void joyInit(int index) {
     JOYINFOEX info;
     info.dwSize  = sizeof(info);
     info.dwFlags = JOY_RETURNALL;
-    joyReady = joyGetPosEx(0, &info) == JOYERR_NOERROR;
+    joyReady[index] = joyGetPosEx(index, &info) == JOYERR_NOERROR;
 }
 
-void joyFree() {
-    joyReady = false;
-    memset(&Input::joy, 0, sizeof(Input::joy));
-    for (int ik = ikJoyA; ik <= ikJoyPOV; ik++)
-        Input::down[ik] = false;
+void joyFree(int index) {
+    joyReady[index] = false;
+    memset(&Input::joy[index], 0, sizeof(Input::joy[index]));
 }
 
 float joyAxis(int x, int xMin, int xMax) {
@@ -80,46 +170,46 @@ vec2 joyDir(float ax, float ay) {
     return dir.normal() * dist;
 }
 
-void joyUpdate() {
-    if (!joyReady) return;
+void joyUpdate(int index) {
+    if (!joyReady[index]) return;
 
     JOYINFOEX info;
     info.dwSize  = sizeof(info);
     info.dwFlags = JOY_RETURNALL;
 
-    if (joyGetPosEx(0, &info) == JOYERR_NOERROR) {
+    if (joyGetPosEx(index, &info) == JOYERR_NOERROR) {
         JOYCAPS caps;
         joyGetDevCaps(0, &caps, sizeof(caps));
 
-        Input::setPos(ikJoyL, joyDir(joyAxis(info.dwXpos, caps.wXmin, caps.wXmax),
-                                     joyAxis(info.dwYpos, caps.wYmin, caps.wYmax)));
+        if (caps.wNumAxes > 0) {
+            Input::setJoyPos(index, jkL, joyDir(joyAxis(info.dwXpos, caps.wXmin, caps.wXmax),
+                                                joyAxis(info.dwYpos, caps.wYmin, caps.wYmax)));
 
-        if ((caps.wCaps & JOYCAPS_HASR) && (caps.wCaps & JOYCAPS_HASU))
-            Input::setPos(ikJoyR, joyDir(joyAxis(info.dwUpos, caps.wUmin, caps.wUmax),
-                                         joyAxis(info.dwRpos, caps.wRmin, caps.wRmax)));
+            if ((caps.wCaps & JOYCAPS_HASR) && (caps.wCaps & JOYCAPS_HASU))
+                Input::setJoyPos(index, jkR, joyDir(joyAxis(info.dwUpos, caps.wUmin, caps.wUmax),
+                                                    joyAxis(info.dwRpos, caps.wRmin, caps.wRmax)));
 
-        if (caps.wCaps & JOYCAPS_HASZ) {
-            float z  = joyAxis(info.dwZpos, caps.wZmin, caps.wZmax);
-            InputKey key = z > JOY_DEAD_ZONE_TRIGGER ? ikJoyLT : (z < -JOY_DEAD_ZONE_TRIGGER ? ikJoyRT : ikNone);
-            if (key != ikNone) {
-                Input::setPos(key, vec2(fabsf(z), 0.0f));
-                Input::setPos(key == ikJoyLT ? ikJoyRT : ikJoyLT, vec2(0.0f)); // release opposite trigger
-            } else {
-                Input::setPos(ikJoyLT, vec2(0.0f));
-                Input::setPos(ikJoyRT, vec2(0.0f));
+            if (caps.wCaps & JOYCAPS_HASZ) {
+                float z = joyAxis(info.dwZpos, caps.wZmin, caps.wZmax);
+                Input::setJoyPos(index, jkLT, vec2(0.0f));
+                Input::setJoyPos(index, jkRT, vec2(0.0f));
+
+                JoyKey key = z > JOY_DEAD_ZONE_TRIGGER ? jkLT : (z < -JOY_DEAD_ZONE_TRIGGER ? jkRT : jkNone);
+                if (key != jkNone)
+                    Input::setJoyPos(index, key, vec2(fabsf(z), 0.0f));
             }
         }
 
         if (caps.wCaps & JOYCAPS_HASPOV)
             if (info.dwPOV == JOY_POVCENTERED)
-                Input::setPos(ikJoyPOV, vec2(0.0f));
+                Input::setJoyPos(index, jkPOV, vec2(0.0f));
             else
-                Input::setPos(ikJoyPOV, vec2(float(1 + info.dwPOV / 4500), 0.0f));
+                Input::setJoyPos(index, jkPOV, vec2(float(1 + info.dwPOV / 4500), 0.0f));
 
         for (int i = 0; i < 10; i++)
-            Input::setDown((InputKey)(ikJoyA + i), (info.dwButtons & (1 << i)) > 0);
+            Input::setJoyDown(index, JoyKey(jkA + i), (info.dwButtons & (1 << i)) > 0);
     } else
-        joyFree();
+        joyFree(index);
 }
 
 // touch
@@ -171,7 +261,6 @@ void touchUpdate(HWND hWnd, HTOUCHINPUT hTouch, int count) {
 
 bool sndReady;
 char *sndData;
-CRITICAL_SECTION sndCS;
 HWAVEOUT waveOut;
 WAVEFORMATEX waveFmt = { WAVE_FORMAT_PCM, 2, 44100, 44100 * 4, 4, 16, sizeof(waveFmt) };
 WAVEHDR waveBuf[2];
@@ -179,41 +268,30 @@ WAVEHDR waveBuf[2];
 void sndFree() {
     if (!sndReady) return;
     sndReady = false;
-    EnterCriticalSection(&sndCS);
     waveOutUnprepareHeader(waveOut, &waveBuf[0], sizeof(WAVEHDR));
     waveOutUnprepareHeader(waveOut, &waveBuf[1], sizeof(WAVEHDR));
     waveOutReset(waveOut);
     waveOutClose(waveOut);
     delete[] sndData;
-    LeaveCriticalSection(&sndCS);
-    DeleteCriticalSection(&sndCS);
 }
 
-void CALLBACK sndFill(HWAVEOUT waveOut, UINT uMsg, DWORD_PTR dwInstance, LPWAVEHDR waveBuf, DWORD dwParam2) {
+void sndFill(HWAVEOUT waveOut, LPWAVEHDR waveBuf) {
     if (!sndReady) return;
-    if (uMsg == MM_WOM_CLOSE) {
-        sndFree();
-        return;
-    }
-
-    EnterCriticalSection(&sndCS);
     waveOutUnprepareHeader(waveOut, waveBuf, sizeof(WAVEHDR));
     Sound::fill((Sound::Frame*)waveBuf->lpData, SND_SIZE / 4);
     waveOutPrepareHeader(waveOut, waveBuf, sizeof(WAVEHDR));
     waveOutWrite(waveOut, waveBuf, sizeof(WAVEHDR));
-    LeaveCriticalSection(&sndCS);
 }
 
 void sndInit(HWND hwnd) {
-    InitializeCriticalSection(&sndCS);
-    if (waveOutOpen(&waveOut, WAVE_MAPPER, &waveFmt, (INT_PTR)sndFill, 0, CALLBACK_FUNCTION) == MMSYSERR_NOERROR) {
+    if (waveOutOpen(&waveOut, WAVE_MAPPER, &waveFmt, (INT_PTR)hwnd, 0, CALLBACK_WINDOW) == MMSYSERR_NOERROR) {
         sndReady = true;
         sndData  = new char[SND_SIZE * 2];
         memset(&waveBuf, 0, sizeof(waveBuf));
         for (int i = 0; i < 2; i++) {
             waveBuf[i].dwBufferLength = SND_SIZE;
             waveBuf[i].lpData = sndData + SND_SIZE * i;
-            sndFill(waveOut, 0, 0, &waveBuf[i], 0);
+            sndFill(waveOut, &waveBuf[i]);
         }
     } else {
         sndReady = false;
@@ -288,11 +366,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         // joystick
         case WM_DEVICECHANGE :
-            joyInit();
+            joyFree(0);
+            joyFree(1);
+            joyInit(0);
+            joyInit(1);
             return 1;
         // touch
         case WM_TOUCH :
             touchUpdate(hWnd, (HTOUCHINPUT)lParam, wParam);
+            break;
+        // sound
+        case MM_WOM_DONE :
+            sndFill((HWAVEOUT)wParam, (WAVEHDR*)lParam);
             break;
         default :
             return DefWindowProc(hWnd, msg, wParam, lParam);
@@ -300,14 +385,19 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     return 0;
 }
 
-HGLRC initGL(HDC hDC) {
+HGLRC glInit(HDC hDC) {
     PIXELFORMATDESCRIPTOR pfd;
     memset(&pfd, 0, sizeof(pfd));
-    pfd.nSize      = sizeof(pfd);
-    pfd.nVersion   = 1;
-    pfd.dwFlags    = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    pfd.cColorBits = 32;
-    pfd.cDepthBits = 24;
+    pfd.nSize        = sizeof(pfd);
+    pfd.nVersion     = 1;
+    pfd.dwFlags      = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.cColorBits   = 32;
+    pfd.cRedBits     = 8;
+    pfd.cGreenBits   = 8;
+    pfd.cBlueBits    = 8;
+    pfd.cAlphaBits   = 8;
+    pfd.cDepthBits   = 24;
+    pfd.cStencilBits = 8;
 
     int format = ChoosePixelFormat(hDC, &pfd);
     SetPixelFormat(hDC, format, &pfd);
@@ -316,10 +406,118 @@ HGLRC initGL(HDC hDC) {
     return hRC;
 }
 
-void freeGL(HGLRC hRC) {
+void glFree(HGLRC hRC) {
     wglMakeCurrent(0, 0);
     wglDeleteContext(hRC);
 }
+
+#ifdef VR_SUPPORT
+vr::IVRSystem *hmd;
+vr::TrackedDevicePose_t tPose[vr::k_unMaxTrackedDeviceCount];
+
+void vrInit() {
+    vr::EVRInitError eError = vr::VRInitError_None;
+    hmd = vr::VR_Init(&eError, vr::VRApplication_Scene);
+
+    if (eError != vr::VRInitError_None) {
+        hmd = NULL;
+        LOG("! unable to init VR runtime: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(eError));
+        return;
+    }
+
+    if (!vr::VRCompositor()) {
+        vr::VR_Shutdown();
+        LOG("! compositor initialization failed\n");
+        return;
+    }
+}
+
+void vrInitTargets() {
+    uint32_t width, height;
+    hmd->GetRecommendedRenderTargetSize( &width, &height);
+    Core::initVR(width, height);
+}
+
+void vrFree() {
+    if (!hmd) return;
+    vr::VR_Shutdown();
+}
+
+mat4 convToMat4(const vr::HmdMatrix44_t &m) {
+    return mat4(m.m[0][0], m.m[1][0], m.m[2][0], m.m[3][0],
+                m.m[0][1], m.m[1][1], m.m[2][1], m.m[3][1], 
+                m.m[0][2], m.m[1][2], m.m[2][2], m.m[3][2], 
+                m.m[0][3], m.m[1][3], m.m[2][3], m.m[3][3]);
+}
+
+mat4 convToMat4(const vr::HmdMatrix34_t &m) {
+    return mat4(m.m[0][0], m.m[1][0], m.m[2][0], 0.0f, 
+                m.m[0][1], m.m[1][1], m.m[2][1], 0.0f,
+                m.m[0][2], m.m[1][2], m.m[2][2], 0.0f,
+                m.m[0][3], m.m[1][3], m.m[2][3], 1.0f);
+}
+
+void vrUpdateInput() {
+    if (!hmd) return;
+    vr::VREvent_t event;
+
+    while (hmd->PollNextEvent(&event, sizeof(event))) {
+        //ProcessVREvent( event );
+        switch (event.eventType) {
+            case vr::VREvent_TrackedDeviceActivated:
+                //SetupRenderModelForTrackedDevice( event.trackedDeviceIndex );
+                LOG( "Device %u attached. Setting up render model\n", event.trackedDeviceIndex);
+                break;
+            case vr::VREvent_TrackedDeviceDeactivated:
+                LOG("Device %u detached.\n", event.trackedDeviceIndex);
+                break;
+            case vr::VREvent_TrackedDeviceUpdated:
+                LOG("Device %u updated.\n", event.trackedDeviceIndex);
+                break;
+        }
+    }
+
+    for (vr::TrackedDeviceIndex_t unDevice = 0; unDevice < vr::k_unMaxTrackedDeviceCount; unDevice++) {
+        vr::VRControllerState_t state;
+        if (hmd->GetControllerState(unDevice, &state, sizeof(state))) {
+            //m_rbShowTrackedDevice[ unDevice ] = state.ulButtonPressed == 0;
+        }
+    }
+}
+
+void vrUpdateView() {
+    if (!hmd) return;
+    vr::VRCompositor()->WaitGetPoses(tPose, vr::k_unMaxTrackedDeviceCount, NULL, 0);
+
+    if (!tPose[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid)
+        return;
+
+    mat4 pL = convToMat4(hmd->GetProjectionMatrix(vr::Eye_Left,  8.0f, 45.0f * 1024.0f));
+    mat4 pR = convToMat4(hmd->GetProjectionMatrix(vr::Eye_Right, 8.0f, 45.0f * 1024.0f));
+
+    mat4 head = convToMat4(tPose[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking);
+    if (Input::hmd.zero.x == INF)
+        Input::hmd.zero = head.getPos();
+    head.setPos(head.getPos() - Input::hmd.zero);
+    
+    mat4 vL = head * convToMat4(hmd->GetEyeToHeadTransform(vr::Eye_Left));
+    mat4 vR = head * convToMat4(hmd->GetEyeToHeadTransform(vr::Eye_Right));
+
+    const float ONE_METER = 768.0f / 1.8f; // Lara's height in units / height in meters
+    vL.setPos(vL.getPos() * ONE_METER);
+    vR.setPos(vR.getPos() * ONE_METER);
+
+    Input::hmd.setView(pL, pR, vL, vR);
+}
+
+void vrCompose() {
+    if (!hmd) return;
+    vr::Texture_t LTex = {(void*)(uintptr_t)Core::eyeTex[0]->ID, vr::TextureType_OpenGL, vr::ColorSpace_Gamma};
+    vr::VRCompositor()->Submit(vr::Eye_Left, &LTex);
+    vr::Texture_t RTex = {(void*)(uintptr_t)Core::eyeTex[1]->ID, vr::TextureType_OpenGL, vr::ColorSpace_Gamma};
+    vr::VRCompositor()->Submit(vr::Eye_Right, &RTex);
+}
+#endif // #ifdef VR_SUPPORT
 
 char Stream::cacheDir[255];
 char Stream::contentDir[255];
@@ -348,53 +546,70 @@ int main(int argc, char** argv) {
     HWND hWnd = CreateWindow("static", "OpenLara", WS_OVERLAPPEDWINDOW, 0, 0, r.right - r.left, r.bottom - r.top, 0, 0, 0, 0);
 
     HDC hDC = GetDC(hWnd);
-    HGLRC hRC = initGL(hDC);
-    
+    HGLRC hRC = glInit(hDC);
+
+#ifdef VR_SUPPORT
+    vrInit();
+#endif
+
     Sound::channelsCount = 0;
 
+    osStartTime = osGetTime();
+
     touchInit(hWnd);
-    joyInit();
+    joyInit(0);
+    joyInit(1);
     sndInit(hWnd);
 
-    char *lvlName = argc > 1 ? argv[1] : NULL;
-    char *sndName = argc > 2 ? argv[2] : NULL;
+    Game::init(argc > 1 ? argv[1] : NULL);
 
-    Game::init(lvlName, sndName);
+#ifdef VR_SUPPORT
+    Input::hmd.ready = hmd != NULL;
+    vrInitTargets();
+#endif
 
     SetWindowLong(hWnd, GWL_WNDPROC, (LONG)&WndProc);
     ShowWindow(hWnd, SW_SHOWDEFAULT);
 
-    DWORD lastTime = getTime();
     MSG msg;
 
-    do {
+    while (!Core::isQuit) {
         if (PeekMessage(&msg, 0, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
+            if (msg.message == WM_QUIT)
+                Core::quit();
         } else {
-            joyUpdate();
-
-            DWORD time = getTime();
-            //if (time <= lastTime)
-            //    continue;
-
-            EnterCriticalSection(&sndCS);
-            Game::update((time - lastTime) * 0.001f);
-            LeaveCriticalSection(&sndCS);
-            lastTime = time;
-
-            Game::render();
-            SwapBuffers(hDC);
+            joyUpdate(0);
+            joyUpdate(1);
+        #ifdef VR_SUPPORT
+            vrUpdateInput();
+        #endif
+            if (Game::update()) {
+            #ifdef VR_SUPPORT
+                vrUpdateView();
+            #endif
+                Game::render();
+            #ifdef VR_SUPPORT
+                vrCompose();
+            #endif
+                Core::waitVBlank();
+                SwapBuffers(hDC);
+            }
             #ifdef _DEBUG
                 Sleep(20);
             #endif
         }
-    } while (msg.message != WM_QUIT);
+    };
 
     sndFree();
     Game::deinit();
 
-    freeGL(hRC);
+#ifdef VR_SUPPORT
+    vrFree();
+#endif
+
+    glFree(hRC);
     ReleaseDC(hWnd, hDC);
 
     DestroyWindow(hWnd);

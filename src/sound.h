@@ -2,18 +2,22 @@
 #define H_SOUND
 
 #define DECODE_VAG
-//#define DECODE_ADPCM
-//#define DECODE_MP3
+#define DECODE_ADPCM
+
 #define DECODE_OGG
 
-#ifdef __EMSCRIPTEN__ // TODO: http streaming
-    #undef DECODE_MP3
+#ifndef _PSP
+    #ifndef __EMSCRIPTEN__
+        #define DECODE_MP3
+    #endif
 #endif
 
 #include "utils.h"
+
 #ifdef DECODE_MP3
     #include "libs/minimp3/minimp3.h"
 #endif
+
 #ifdef DECODE_OGG
     #define STB_VORBIS_HEADER_ONLY
     #include "libs/stb_vorbis/stb_vorbis.c"
@@ -21,6 +25,7 @@
 
 #define SND_CHANNELS_MAX    128
 #define SND_FADEOFF_DIST    (1024.0f * 8.0f)
+#define SND_MAX_VOLUME      20
 
 namespace Sound {
 
@@ -36,7 +41,7 @@ namespace Sound {
         #define MAX_FDN     16
         #define MAX_DELAY   1024
 
-        static const short FDN[MAX_FDN] = {281,331,373,419,461,503,547,593,641,683,727,769,811,853,907,953};
+        static const int16 FDN[MAX_FDN] = { 281, 331, 373, 419, 461, 503, 547, 593, 641, 683, 727, 769, 811, 853, 907, 953 };
 
         struct Delay {
             int     index;
@@ -118,6 +123,8 @@ namespace Sound {
                 // apply pan
                     for (int j = 0; j < MAX_FDN; j++) {
                         output[j] = out - buffer[(j + MAX_FDN - 1) % MAX_FDN];
+                        if (output[j] < EPS)
+                            output[j] = 0.0f;
                         L += buffer[j] * panCoeff[j][0];
                         R += buffer[j] * panCoeff[j][1];
                     }
@@ -144,33 +151,70 @@ namespace Sound {
 
     struct PCM : Decoder {
         int freq, size, bits;
+        Frame frameLast;
 
-        PCM(Stream *stream, int channels, int freq, int size, int bits) : Decoder(stream, channels), freq(freq), size(size), bits(bits) {}
+        PCM(Stream *stream, int channels, int freq, int size, int bits) : Decoder(stream, channels), freq(freq), size(size), bits(bits) { frameLast.L = frameLast.R = 0; }
 
         virtual int decode(Frame *frames, int count) {
             if (stream->pos - offset >= size) return 0;
+
+            // ! in the original game series only 11025 and 22050 Hz single channel samples were used ! //
+
+            Frame frame;
             if (bits == 16) {
                 int16 value;
                 if (channels == 2) {
-                    frames[0].L = stream->read(value);
-                    frames[0].R = stream->read(value);
+                    frame.L = stream->read(value);
+                    frame.R = stream->read(value);
                 } else
-                    frames[0].L = frames[0].R = stream->read(value);
+                    frame.L = frame.R = stream->read(value);
             } else if (bits == 8) {
                 uint8 value;
                 if (channels == 2) {
-                    frames[0].L = stream->read(value) * 257 - 32768;
-                    frames[0].R = stream->read(value) * 257 - 32768;
+                    frame.L = stream->read(value) * 257 - 32768;
+                    frame.R = stream->read(value) * 257 - 32768;
                 } else
-                    frames[0].L = frames[0].R = stream->read(value) * 257 - 32768;
+                    frame.L = frame.R = stream->read(value) * 257 - 32768;
             } else {
                 ASSERT(false);
                 return 0;
             }
 
-            int k = 44100 / freq;
-            for (int i = 1; i < k; i++) frames[i] = frames[0]; // TODO: lerp
-            return k;
+            int dL = int(frame.L) - int(frameLast.L);
+            int dR = int(frame.R) - int(frameLast.R);
+            switch (freq) {
+                case 11025 :
+                    if (channels == 2) {
+                        frames[0].L = frameLast.L + dL / 4;                   // 0.25 L
+                        frames[0].R = frameLast.R + dR / 4;                   // 0.25 R
+                        frames[1].L = frameLast.L + dL / 2;                   // 0.50 L
+                        frames[1].R = frameLast.R + dR / 2;                   // 0.50 R
+                        frames[2].L = frameLast.L + dL * 3 / 4;               // 0.75 L
+                        frames[2].R = frameLast.R + dR * 3 / 4;               // 0.75 R
+                    } else {
+                        frames[0].L = frames[0].R = frameLast.L + dL / 4;     // 0.25 LR
+                        frames[1].L = frames[1].R = frameLast.L + dL / 2;     // 0.50 LR
+                        frames[2].L = frames[2].R = frameLast.L + dL * 3 / 4; // 0.75 LR
+                    }
+                    frames[3] = frameLast = frame;                            // 1.00 LR
+                    return 4;
+                case 22050 :
+                    if (channels == 2) {
+                        frames[0].L = frameLast.L + dL / 2;                   // 0.50 L
+                        frames[0].R = frameLast.R + dR / 2;                   // 0.50 R
+                    } else
+                        frames[0].L = frames[0].R = frameLast.L + dL / 2;     // 0.50 LR
+                    frames[1] = frameLast = frame;                            // 1.00 LR
+                    return 2;
+                case 44100 : // not used
+                    frames[0] = frameLast = frame;
+                    return 1;
+                default    : // impossible
+                    ASSERT(false);
+                    int k = 44100 / freq;
+                    for (int i = 0; i < k; i++) frames[i] = frame; // no lerp
+                    return k;
+            }
         }
     };
 
@@ -210,7 +254,7 @@ namespace Sound {
 
             if (seek % block == 0) {
                 for (int i = 0; i < channels; i++) {
-                    char index;
+                    uint8 index;
                     stream->read(index);
                     channel[i].c1 = coeff1[index];
                     channel[i].c2 = coeff2[index];
@@ -367,23 +411,18 @@ namespace Sound {
         stb_vorbis       *ogg;
         stb_vorbis_alloc alloc;
 
-        char       *buffer;
-        int        size, pos;        
-
-        OGG(Stream *stream, int channels) : Decoder(stream, channels), size(stream->size), pos(0) {
-            buffer = new char[size]; // TODO: file streaming
-            stream->raw(buffer, size);
+        OGG(Stream *stream, int channels) : Decoder(stream, channels), ogg(NULL) {
             alloc.alloc_buffer_length_in_bytes = 256 * 1024;
             alloc.alloc_buffer = new char[alloc.alloc_buffer_length_in_bytes];
-            ogg = stb_vorbis_open_memory((unsigned char*)buffer, size, NULL, &alloc);
+            ogg = stb_vorbis_open_filename(stream->name, NULL, &alloc);
+            ASSERT(ogg);
             stb_vorbis_info info = stb_vorbis_get_info(ogg);
-            channels = info.channels;
+            this->channels = info.channels;
         }
 
         virtual ~OGG() {
             stb_vorbis_close(ogg);
             delete[] alloc.alloc_buffer;
-            delete[] buffer;
         }
 
         virtual int decode(Frame *frames, int count) {
@@ -397,15 +436,23 @@ namespace Sound {
         }
 
         virtual void replay() {
-            stb_vorbis_close(ogg);
-            ogg = stb_vorbis_open_memory((unsigned char*)buffer, size, NULL, &alloc);
+            stb_vorbis_seek_start(ogg);
         }
     };
 #endif
+    Mutex lock;
 
     struct Listener {
         mat4 matrix;
-    } listener;
+    } listener[2];
+
+    int listenersCount;
+
+    Listener& getListener(const vec3 &pos) {
+        if (listenersCount == 1 || (listener[0].matrix.getPos() - pos).length2() < (listener[1].matrix.getPos() - pos).length2())
+            return listener[0];
+        return listener[1];
+    }
 
     enum Flags {
         LOOP            = 1,
@@ -435,7 +482,7 @@ namespace Sound {
             uint32 fourcc; 
             stream->read(fourcc);
             if (fourcc == FOURCC("RIFF")) { // wav
-                
+
                 struct {
                     uint16  format;
                     uint16  channels;
@@ -451,7 +498,7 @@ namespace Sound {
                     stream->read(type);
                     stream->read(size);
                     if (type == FOURCC("fmt ")) {
-                        stream->read(waveFmt);
+                        stream->raw(&waveFmt, sizeof(waveFmt));
                         stream->seek(size - sizeof(waveFmt));
                     } else if (type == FOURCC("data")) {
                         if (waveFmt.format == 1) decoder = new PCM(stream, waveFmt.channels, waveFmt.samplesPerSec, size, waveFmt.sampleBits);
@@ -463,26 +510,28 @@ namespace Sound {
                         stream->seek(size);
                 }
             } 
-            #ifdef DECODE_OGG
             else if (fourcc == FOURCC("OggS")) { // ogg
                 stream->seek(-4);
-                decoder = new OGG(stream, 2);
+                #ifdef DECODE_OGG
+                    decoder = new OGG(stream, 2);
+                #endif 
             }
-            #endif 
-            #ifdef DECODE_MP3
             else if (fourcc == FOURCC("ID3\3")) { // mp3
-                decoder = new MP3(stream, 2);
+                #ifdef DECODE_MP3
+                    decoder = new MP3(stream, 2);
+                #endif
             }
-            #endif
-            #ifdef DECODE_VAG
             else { // vag
                 stream->setPos(0);
-                decoder = new VAG(stream);
+                #ifdef DECODE_VAG
+                    decoder = new VAG(stream);
+                #endif
             }
-            #endif
+
+            if (!decoder)
+                delete stream;
 
             isPlaying = decoder != NULL;
-            ASSERT(isPlaying);
         }
 
         ~Sample() {
@@ -505,11 +554,11 @@ namespace Sound {
         vec2 getPan() {
             if (!(flags & PAN))
                 return vec2(1.0f);
-            mat4  m = Sound::listener.matrix;
-            vec3  v = pos - m.offset.xyz;
+            mat4  m = Sound::getListener(pos).matrix;
+            vec3  v = pos - m.offset().xyz();
 
             float dist = max(0.0f, 1.0f - (v.length() / SND_FADEOFF_DIST));
-            float pan  = m.right.xyz.dot(v.normal());
+            float pan  = m.right().xyz().dot(v.normal());
 
             float l = min(1.0f, 1.0f - pan);
             float r = min(1.0f, 1.0f + pan);
@@ -524,7 +573,7 @@ namespace Sound {
             while (i < count) {
                 int res = decoder->decode(&frames[i], count - i);
                 if (res == 0) {
-                    if (!(flags & Flags::LOOP)) {
+                    if (!(flags & LOOP)) {
                         isPlaying = false;
                         break;
                     } else
@@ -535,7 +584,7 @@ namespace Sound {
         // apply volume
             #define VOL_CONV(x) (1.0f - sqrtf(1.0f - x * x));
 
-            float m = ((flags & Flags::MUSIC) ? Core::settings.audio.music : Core::settings.audio.sound);
+            float m = ((flags & MUSIC) ? Core::settings.audio.music : Core::settings.audio.sound) / float(SND_MAX_VOLUME);
             float v = volume * m;
             vec2 pan = getPan();
             vec2 vol = pan * VOL_CONV(v);
@@ -610,7 +659,7 @@ namespace Sound {
                 if (!(channels[i]->flags & (flipped ? FLIPPED : UNFLIPPED)))
                     continue;
 
-                vec3 d = channels[i]->pos - listener.matrix.getPos();
+                vec3 d = channels[i]->pos - getListener(channels[i]->pos).matrix.getPos();
                 if (fabsf(d.x) > SND_FADEOFF_DIST || fabsf(d.y) > SND_FADEOFF_DIST || fabsf(d.z) > SND_FADEOFF_DIST)
                     continue;
             }
@@ -647,6 +696,8 @@ namespace Sound {
     }
 
     void fill(Frame *frames, int count) {
+        OS_LOCK(lock);
+
         if (!channelsCount) {
             if (result) {
                 memset(result, 0, sizeof(FrameHI) * count);
@@ -679,8 +730,11 @@ namespace Sound {
             }
     }
 
-    Stream *openWAD(const char *name) {
-        Stream *stream = new Stream("cdaudio.wad");
+    Stream *openCDAudioWAD(const char *name, int index = -1) {
+        if (!Stream::existsContent(name))
+            return NULL;
+
+        Stream *stream = new Stream(name);
         if (stream->size) {
             struct Item {
                 char name[260];
@@ -688,23 +742,32 @@ namespace Sound {
                 int  offset;
             } entity;
 
-            for (int i = 0; i < 130; i++) {
-                stream->read(entity);
-                if (strcmp(name, entity.name) == 0) {
-                    stream->setPos(entity.offset);
-                    return stream;
-                }
-            }
+            stream->seek(sizeof(entity) * index);
+            stream->raw(&entity, sizeof(entity));
+            stream->setPos(entity.offset);
+            return stream;
         }
         delete stream;
         return NULL;
     }
 
+    Stream *openCDAudioMP3(const char *dat, const char *name, int index = -1) {
+        if (!Stream::existsContent(dat) || !Stream::existsContent(name))
+            return NULL;
+        Stream *stream = new Stream(name);
+        return stream;
+    }
+
     Sample* play(Stream *stream, const vec3 &pos, float volume = 1.0f, float pitch = 0.0f, int flags = 0, int id = - 1) {
+        OS_LOCK(lock);
+
+        ASSERT(pitch >= 0.0f);
         if (!stream) return NULL;
         if (volume > 0.001f) {
+            vec3 listenerPos = getListener(pos).matrix.getPos();
+
             if (!(flags & (FLIPPED | UNFLIPPED | MUSIC)) && (flags & PAN)) {
-                vec3 d = pos - listener.matrix.getPos();
+                vec3 d = pos - listenerPos;
                 if (fabsf(d.x) > SND_FADEOFF_DIST || fabsf(d.y) > SND_FADEOFF_DIST || fabsf(d.z) > SND_FADEOFF_DIST) {
                     delete stream;
                     return NULL;
@@ -714,7 +777,7 @@ namespace Sound {
             if (flags & (UNIQUE | REPLAY)) {
                 for (int i = 0; i < channelsCount; i++)
                     if (channels[i]->id == id) {
-                        vec3 p = listener.matrix.getPos();
+                        vec3 p = listenerPos;
 
                         if ((p - channels[i]->pos).length2() > (p - pos).length2()) {
                             channels[i]->pos = pos;
@@ -739,12 +802,16 @@ namespace Sound {
     }
 
     void stop(int id = -1) {
+        OS_LOCK(lock);
+
         for (int i = 0; i < channelsCount; i++)
             if (id == -1 || channels[i]->id == id)
                 channels[i]->stop();
     }
 
     void stopAll() {
+        OS_LOCK(lock);
+
         for (int i = 0; i < channelsCount; i++)
             delete channels[i];
         channelsCount = 0;

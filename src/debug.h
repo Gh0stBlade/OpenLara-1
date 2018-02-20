@@ -48,6 +48,7 @@ namespace Debug {
     }
 
     void begin() {
+        glDisable(GL_TEXTURE_2D);
         glMatrixMode(GL_PROJECTION);
         glLoadMatrixf((GLfloat*)&Core::mProj);
         glMatrixMode(GL_MODELVIEW);
@@ -64,7 +65,7 @@ namespace Debug {
     }
 
     void end() {
-        //
+        glEnable(GL_TEXTURE_2D);
     }
 
     namespace Draw {
@@ -198,15 +199,62 @@ namespace Debug {
         void text(const vec3 &pos, const vec4 &color, const char *str) {
             vec4 p = Core::mViewProj * vec4(pos, 1);
             if (p.w > 0) {
-                p.xyz = p.xyz * (1.0f / p.w);
+                p.xyz() = p.xyz() * (1.0f / p.w);
                 p.y = -p.y;	
-                p.xyz = (p.xyz * 0.5f + vec3(0.5f)) * vec3(float(Core::width), float(Core::height), 1.0f);	
+                p.xyz() = (p.xyz() * 0.5f + vec3(0.5f)) * vec3(float(Core::width), float(Core::height), 1.0f);	
                 text(vec2(p.x, p.y), color, str);
             }
         }
     }
 
     namespace Level {
+
+        #define case_name(a,b) case a::b : return #b
+
+        const char *getTriggerType(const TR::Level &level, const TR::Level::Trigger::Type &trigger) {
+            switch (trigger) {
+                case_name(TR::Level::Trigger, ACTIVATE );
+                case_name(TR::Level::Trigger, PAD      );
+                case_name(TR::Level::Trigger, SWITCH   );
+                case_name(TR::Level::Trigger, KEY      );
+                case_name(TR::Level::Trigger, PICKUP   );
+                case_name(TR::Level::Trigger, HEAVY    );
+                case_name(TR::Level::Trigger, ANTIPAD  );
+                case_name(TR::Level::Trigger, COMBAT   );
+                case_name(TR::Level::Trigger, DUMMY    );
+            }
+            return "UNKNOWN";
+        }
+
+        const char *getTriggerAction(const TR::Level &level, uint16 action) {
+            switch (action) {
+                case_name(TR::Action, ACTIVATE      );
+                case_name(TR::Action, CAMERA_SWITCH );
+                case_name(TR::Action, FLOW          );
+                case_name(TR::Action, FLIP          );
+                case_name(TR::Action, FLIP_ON       );
+                case_name(TR::Action, FLIP_OFF      );
+                case_name(TR::Action, CAMERA_TARGET );
+                case_name(TR::Action, END           );
+                case_name(TR::Action, SOUNDTRACK    );
+                case_name(TR::Action, EFFECT        );
+                case_name(TR::Action, SECRET        );
+            }
+            return "UNKNOWN";
+        }
+
+        const char *TR_TYPE_NAMES[] = { TR_TYPES(DECL_STR) };
+
+        const char *getEntityName(const TR::Level &level, const TR::Entity &entity) {
+            if (entity.type < TR::Entity::TR1_TYPE_MAX)
+                return TR_TYPE_NAMES[entity.type - TR1_TYPES_START];
+            if (entity.type < TR::Entity::TR2_TYPE_MAX)
+                return TR_TYPE_NAMES[entity.type - TR2_TYPES_START + (TR::Entity::TR1_TYPE_MAX - TR1_TYPES_START) + 1];
+            if (entity.type < TR::Entity::TR3_TYPE_MAX)
+                return TR_TYPE_NAMES[entity.type - TR3_TYPES_START + (TR::Entity::TR1_TYPE_MAX - TR1_TYPES_START) + (TR::Entity::TR2_TYPE_MAX - TR2_TYPES_START) + 2];
+
+            return "UNKNOWN";
+        }
 
         void debugFloor(IGame *game, int roomIndex, int x, int y, int z, int zone = -1) {
             TR::Level *level = game->getLevel();
@@ -222,20 +270,36 @@ namespace Debug {
 
             vec3 rf[4], rc[4], f[4], c[4];
 
-            float offsets[4][2] = { { 1, 1 }, { 1023, 1 }, { 1023, 1023 }, { 1, 1023 } };
+            int offsets[4][2] = { { 1, 1 }, { 1023, 1 }, { 1023, 1023 }, { 1, 1023 } };
 
             for (int i = 0; i < 4; i++) {
                 game->getLara()->getFloorInfo(roomIndex, vec3(float(x + offsets[i][0]), float(y), float(z + offsets[i][1])), info);
-                rf[i] = vec3( x + offsets[i][0], info.roomFloor - 4,   z + offsets[i][1] );
-                rc[i] = vec3( x + offsets[i][0], info.roomCeiling + 4, z + offsets[i][1] );
-                f[i]  = vec3( x + offsets[i][0], info.floor - 4,       z + offsets[i][1] );
-                c[i]  = vec3( x + offsets[i][0], info.ceiling + 4,     z + offsets[i][1] );
-                if (info.roomBelow == 0xFF) rf[i].y = f[i].y;
-                if (info.roomAbove == 0xFF) rc[i].y = c[i].y;
+                rf[i] = vec3( float(x + offsets[i][0]), info.roomFloor - 4,   float(z + offsets[i][1]) );
+                rc[i] = vec3( float(x + offsets[i][0]), info.roomCeiling + 4, float(z + offsets[i][1]) );
+                f[i]  = vec3( float(x + offsets[i][0]), info.floor - 4,       float(z + offsets[i][1]) );
+                c[i]  = vec3( float(x + offsets[i][0]), info.ceiling + 4,     float(z + offsets[i][1]) );
+
+                /*
+                int px = x + offsets[i][0];
+                int py = y;
+                int pz = z + offsets[i][1];
+
+                int dx, dz;
+
+                int16 ridx = roomIndex;
+                TR::Room::Sector *sector = game->getLevel()->getSectorNext(ridx, px, py, pz);
+                int floor = game->getLevel()->getFloor(sector, px, py, pz);
+                int ceiling = game->getLevel()->getCeiling(sector, px, py, pz);
+
+                f[i]  = vec3( px, floor - 4,   pz );
+                c[i]  = vec3( px, ceiling + 4, pz );
+                */
+                if (info.roomBelow == TR::NO_ROOM) rf[i].y = f[i].y;
+                if (info.roomAbove == TR::NO_ROOM) rc[i].y = c[i].y;
             }
 
             if (info.roomNext != 0xFF) {
-                glColor4f(0.0f, 0.0f, 1.0f, 0.1f);
+                glColor4f(0.0f, 0.0f, 1.0f, 1.0f);
                 glBegin(GL_QUADS);
                     glVertex3fv((GLfloat*)&f[3]);
                     glVertex3fv((GLfloat*)&f[2]);
@@ -417,10 +481,10 @@ namespace Debug {
             for (int i = 0; i < level.entitiesCount; i++) {
                 TR::Entity &e = level.entities[i];
                 Controller *controller = (Controller*)e.controller;
-                if (!controller) return;
+                if (!controller || controller->flags.invisible) return;
           
-                sprintf(buf, "%d (%d)", (int)e.type, i);
-                Debug::Draw::text(controller->pos, controller->flags.active ? vec4(0, 0, 0.8f, 1) : vec4(0.8f, 0, 0, 1), buf);
+                sprintf(buf, "%s (%d)", getEntityName(level, e), i);
+                Debug::Draw::text(controller->getPos() + randf() * 64, controller->flags.active ? vec4(0, 0, 0.8f, 1) : vec4(0.8f, 0, 0, 1), buf);
             }
 
             for (int i = 0; i < level.camerasCount; i++) {
@@ -474,9 +538,8 @@ namespace Debug {
             for (int i = 0; i < level.roomsCount; i++)
                 for (int j = 0; j < level.rooms[i].lightsCount; j++) {
                     TR::Room::Light &l = level.rooms[i].lights[j];
-                    float a = 1.0f - intensityf(l.intensity);
                     vec3 p = vec3(float(l.x), float(l.y), float(l.z));
-                    vec4 color = vec4(a, a, a, 1);
+                    vec4 color = vec4(l.color.r, l.color.g, l.color.b, 255) * (1.0f / 255.0f);
 
 //                    if (i == room) color.x = color.z = 0;
                     Debug::Draw::point(p, color);
@@ -485,7 +548,7 @@ namespace Debug {
                     Debug::Draw::sphere(p, float(l.radius), color);
                 }
 
-            vec4 color = vec4(lara->mainLightColor.x, 0.0f, 0.0f, 1.0f);
+            vec4 color = vec4(lara->mainLightColor.xyz(), 1.0f);
             Debug::Draw::point(lara->mainLightPos, color);
             Debug::Draw::sphere(lara->mainLightPos, lara->mainLightColor.w, color);
         }
@@ -577,7 +640,7 @@ namespace Debug {
             FILE *f = fopen(buf, "wb");
 
             if (level->version == TR::VER_TR1_PSX) {
-                int dataSize = level->soundSize[index] / 16 * 28 * 2 * 4;
+                uint32 dataSize = level->soundSize[index] / 16 * 28 * 2 * 4;
 
                 struct Header {
                     uint32 RIFF;
@@ -596,10 +659,10 @@ namespace Debug {
                     uint32 data;
                     uint32 dataSize;
                 } header = {
-                        FOURCC("RIFF"), (uint32) sizeof(Header) - 8 + dataSize,
+                        FOURCC("RIFF"), sizeof(Header) - 8 + dataSize,
                         FOURCC("WAVE"), FOURCC("fmt "), 16,
                         { 1, 1, 44100, 44100 * 16 / 8, 0, 16 },
-                        FOURCC("data"), (uint32) dataSize
+                        FOURCC("data"), dataSize
                     };
 
                 fwrite(&header, sizeof(header), 1, f);
@@ -619,49 +682,11 @@ namespace Debug {
             fclose(f);
         }
 
-        #define case_name(a,b) case a::b : return #b
+        void info(IGame *game, Controller *controller, Animation &anim) {
+            TR::Level &level = *game->getLevel();
 
-        const char *getTriggerType(const TR::Level &level, const TR::Level::Trigger &trigger) {
-            switch (trigger) {
-                case_name(TR::Level::Trigger, ACTIVATE );
-                case_name(TR::Level::Trigger, PAD      );
-                case_name(TR::Level::Trigger, SWITCH   );
-                case_name(TR::Level::Trigger, KEY      );
-                case_name(TR::Level::Trigger, PICKUP   );
-                case_name(TR::Level::Trigger, HEAVY    );
-                case_name(TR::Level::Trigger, ANTIPAD  );
-                case_name(TR::Level::Trigger, COMBAT   );
-                case_name(TR::Level::Trigger, DUMMY    );
-            }
-            return "UNKNOWN";
-        }
+            if (level.isCutsceneLevel()) return;
 
-        const char *getTriggerAction(const TR::Level &level, const TR::Action &action) {
-            switch (action) {
-                case_name(TR::Action, ACTIVATE      );
-                case_name(TR::Action, CAMERA_SWITCH );
-                case_name(TR::Action, FLOW          );
-                case_name(TR::Action, FLIP          );
-                case_name(TR::Action, FLIP_ON       );
-                case_name(TR::Action, FLIP_OFF      );
-                case_name(TR::Action, CAMERA_TARGET );
-                case_name(TR::Action, END           );
-                case_name(TR::Action, SOUNDTRACK    );
-                case_name(TR::Action, EFFECT        );
-                case_name(TR::Action, SECRET        );
-            }
-            return "UNKNOWN";
-        }
-
-        const char *TR_TYPE_NAMES[] = { TR_TYPES(DECL_STR) };
-
-        const char *getEntityName(const TR::Level &level, const TR::Entity &entity) {
-            if (entity.type >= COUNT(TR_TYPE_NAMES))
-                return "UNKNOWN";
-            return TR_TYPE_NAMES[entity.type];
-        }
-
-        void info(const TR::Level &level, Controller *controller, Animation &anim) {
             float y = 0.0f;
 
             int activeCount = 0;
@@ -675,7 +700,7 @@ namespace Debug {
             sprintf(buf, "DIP = %d, TRI = %d, SND = %d, active = %d", Core::stats.dips, Core::stats.tris, Sound::channelsCount, activeCount);
             Debug::Draw::text(vec2(16, y += 16), vec4(1.0f), buf);
             vec3 angle = controller->angle * RAD2DEG;
-            sprintf(buf, "pos = (%d, %d, %d), angle = (%d, %d), room = %d (camera: %d)", int(controller->pos.x), int(controller->pos.y), int(controller->pos.z), (int)angle.x, (int)angle.y, controller->getRoomIndex(), ((ICamera*)level.cameraController)->getRoomIndex());
+            sprintf(buf, "pos = (%d, %d, %d), angle = (%d, %d), room = %d (camera: %d)", int(controller->pos.x), int(controller->pos.y), int(controller->pos.z), (int)angle.x, (int)angle.y, controller->getRoomIndex(), game->getCamera()->getRoomIndex());
             Debug::Draw::text(vec2(16, y += 16), vec4(1.0f), buf);
             int rate = anim.anims[anim.index].frameRate;
             sprintf(buf, "state = %d, anim = %d, next = %d, rate = %d, frame = %.2f / %d (%f)", anim.state, anim.index, anim.next, rate, anim.time * 30.0f, anim.framesCount, anim.delta);
@@ -683,7 +708,7 @@ namespace Debug {
             
             TR::Level::FloorInfo info;
             controller->getFloorInfo(controller->getRoomIndex(), controller->pos, info);
-            sprintf(buf, "floor = %d, roomBelow = %d, roomAbove = %d, height = %d", info.floorIndex, info.roomBelow, info.roomAbove, info.floor - info.ceiling);
+            sprintf(buf, "floor = %d, roomBelow = %d, roomAbove = %d, roomNext = %d, height = %d", info.floorIndex, info.roomBelow, info.roomAbove, info.roomNext, int(info.floor - info.ceiling));
             Debug::Draw::text(vec2(16, y += 16), vec4(1.0f), buf);
 
             y += 16;
@@ -701,7 +726,7 @@ namespace Debug {
                     sprintf(buf, "%s -> %s (%d)", getTriggerAction(level, cmd.action), ent, cmd.args);
                     if (cmd.action == TR::Action::CAMERA_SWITCH) {
                         i++;
-                        sprintf(buf, "%s delay: %d speed: %d", buf, int(info.trigCmd[i].timer), int(info.trigCmd[i].speed) * 8 + 1);
+                        sprintf(buf, "%s delay: %d speed: %d", buf, int(info.trigCmd[i].timer), int(info.trigCmd[i].speed));
                     }
 
                     Debug::Draw::text(vec2(16, y += 16), vec4(0.1f, 0.6f, 0.1f, 1.0f), buf);

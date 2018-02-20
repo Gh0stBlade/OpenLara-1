@@ -15,13 +15,69 @@
 
 #define WND_TITLE    "OpenLara"
 
-// Time
+// multi-threading
+void* osMutexInit() {
+    pthread_mutex_t *mutex = new pthread_mutex_t();
+    pthread_mutex_init(mutex, NULL);
+    return mutex;
+}
+
+void osMutexFree(void *obj) {
+    pthread_mutex_destroy((pthread_mutex_t*)obj);
+    delete (pthread_mutex_t*)obj;
+}
+
+void osMutexLock(void *obj) {
+    pthread_mutex_lock((pthread_mutex_t*)obj);
+}
+
+void osMutexUnlock(void *obj) {
+    pthread_mutex_unlock((pthread_mutex_t*)obj);
+}
+
+void* osRWLockInit() {
+    pthread_rwlock_t *lock = new pthread_rwlock_t();
+    pthread_rwlock_init(lock, NULL);
+    return lock;
+}
+
+void osRWLockFree(void *obj) {
+    pthread_rwlock_destroy((pthread_rwlock_t*)obj);
+    delete (pthread_rwlock_t*)obj;
+}
+
+void osRWLockRead(void *obj) {
+    pthread_rwlock_rdlock((pthread_rwlock_t*)obj);
+}
+
+void osRWUnlockRead(void *obj) {
+    pthread_rwlock_unlock((pthread_rwlock_t*)obj);
+}
+
+void osRWLockWrite(void *obj) {
+    pthread_rwlock_wrlock((pthread_rwlock_t*)obj);
+}
+
+void osRWUnlockWrite(void *obj) {
+    pthread_rwlock_unlock((pthread_rwlock_t*)obj);
+}
+
+
+// timing
 unsigned int startTime;
 
-int getTime() {
+int osGetTime() {
     timeval t;
     gettimeofday(&t, NULL);
     return int((t.tv_sec - startTime) * 1000 + t.tv_usec / 1000);
+}
+
+bool osSave(const char *name, const void *data, int size) {
+    FILE *f = fopen(name, "wb");
+    if (!f) return false;
+    fwrite(data, size, 1, f);
+    fclose(f);
+    return true;
 }
 
 // Sound
@@ -29,13 +85,10 @@ snd_pcm_uframes_t   SND_FRAMES = 512;
 snd_pcm_t           *sndOut;
 Sound::Frame        *sndData;
 pthread_t           sndThread;
-pthread_mutex_t     sndMutex;
 
 void* sndFill(void *arg) {
     while (sndOut) {
-        pthread_mutex_lock(&sndMutex);
         Sound::fill(sndData, SND_FRAMES);
-        pthread_mutex_unlock(&sndMutex);
 
         int err = snd_pcm_writei(sndOut, sndData, SND_FRAMES);
         if (err < 0) {
@@ -56,8 +109,6 @@ void* sndFill(void *arg) {
 
 bool sndInit() {
     unsigned int freq = 44100;
-
-    pthread_mutex_init(&sndMutex, NULL);
 
     int err;
     if ((err = snd_pcm_open(&sndOut, "default", SND_PCM_STREAM_PLAYBACK, 0)) < 0) {
@@ -98,12 +149,9 @@ bool sndInit() {
 
 void sndFree() {
     pthread_cancel(sndThread);
-    pthread_mutex_lock(&sndMutex);
     snd_pcm_drop(sndOut);
     snd_pcm_drain(sndOut);
     snd_pcm_close(sndOut);
-    pthread_mutex_unlock(&sndMutex);
-    pthread_mutex_destroy(&sndMutex);
     delete[] sndData;
 }
 
@@ -262,26 +310,32 @@ InputKey codeToInputKey(int code) {
         case KEY_X          : return ikX;
         case KEY_Y          : return ikY;
         case KEY_Z          : return ikZ;
+        case KEY_HOMEPAGE   : return ikEscape;
     // mouse
         case BTN_LEFT       : return ikMouseL;
         case BTN_RIGHT      : return ikMouseR;
         case BTN_MIDDLE     : return ikMouseM;
-    // gamepad
-        case KEY_HOMEPAGE   : return ikEscape;
-        case BTN_A          : return ikJoyA;
-        case BTN_B          : return ikJoyB;
-        case BTN_X          : return ikJoyX;
-        case BTN_Y          : return ikJoyY;
-        case BTN_TL         : return ikJoyLB;
-        case BTN_TR         : return ikJoyRB;
-        case BTN_SELECT     : return ikJoySelect;
-        case BTN_START      : return ikJoyStart;
-        case BTN_THUMBL     : return ikJoyL;
-        case BTN_THUMBR     : return ikJoyR;
-        case BTN_TL2        : return ikJoyLT;
-        case BTN_TR2        : return ikJoyRT;
     }
     return ikNone;
+}
+
+JoyKey codeToJoyKey(int code) {
+    switch (code) {
+    // gamepad
+        case BTN_A          : return jkA;
+        case BTN_B          : return jkB;
+        case BTN_X          : return jkX;
+        case BTN_Y          : return jkY;
+        case BTN_TL         : return jkLB;
+        case BTN_TR         : return jkRB;
+        case BTN_SELECT     : return jkSelect;
+        case BTN_START      : return jkStart;
+        case BTN_THUMBL     : return jkL;
+        case BTN_THUMBR     : return jkR;
+        case BTN_TL2        : return jkLT;
+        case BTN_TR2        : return jkRT;
+    }
+    return jkNone;
 }
 
 int inputDevIndex(const char *node) {
@@ -366,9 +420,14 @@ void inputUpdate() {
             switch (e->type) {
                 case EV_KEY : {
                     InputKey key = codeToInputKey(e->code);
-                    if (key == ikMouseL || key == ikMouseR || key == ikMouseM)
-                        Input::setPos(key, Input::mouse.pos);
-                    Input::setDown(key, e->value != 0);
+                    if (key != ikNone) {
+                        if (key == ikMouseL || key == ikMouseR || key == ikMouseM)
+                            Input::setPos(key, Input::mouse.pos);
+                        Input::setDown(key, e->value != 0);
+                    } else {
+                        JoyKey key = codeToJoyKey(e->code);
+                        Input::setJoyDown(0, key, e->value != 0);
+                    }
                     break;
                 }
                 case EV_REL : {
@@ -392,8 +451,8 @@ void inputUpdate() {
             rb -= sizeof(events[0]);
         }
     }
-    Input::setPos(ikJoyL, joyL);
-    Input::setPos(ikJoyR, joyR);
+    Input::setJoyPos(0, jkL, joyL);
+    Input::setJoyPos(0, jkR, joyR);
 // monitoring plug and unplug input devices
     fd_set fds;
     FD_ZERO(&fds);
@@ -460,32 +519,22 @@ int main(int argc, char **argv) {
     sndInit();
 
     char *lvlName = argc > 1 ? argv[1] : NULL;
-    char *sndName = argc > 2 ? argv[2] : NULL;
 
-    Game::init(lvlName, sndName);
+    Game::init(lvlName);
 
     inputInit(); // initialize and grab input devices
 
-    int lastTime = getTime();
-
-    while (!Input::down[ikEscape]) {
+    while (!Core::isQuit) {
         inputUpdate();
 
-        int time = getTime();
-        if (time <= lastTime)
-            continue;
-
-        pthread_mutex_lock(&sndMutex);
-        Game::update((time - lastTime) * 0.001f);
-        pthread_mutex_unlock(&sndMutex);
-        lastTime = time;
-
-        Game::render();
-        eglSwapBuffers(display, surface);
+		if (Game::update()) {
+			Game::render();
+			eglSwapBuffers(display, surface);
+		}
     };
 
     sndFree();
-    Game::free();
+    Game::deinit();
 
     inputFree();
     eglFree(display, surface, context);

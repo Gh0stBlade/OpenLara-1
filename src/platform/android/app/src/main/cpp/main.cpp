@@ -3,6 +3,7 @@
 #include <sys/time.h>
 #include <stdio.h>
 #include <math.h>
+#include <pthread.h>
 
 #include "game.h"
 
@@ -10,17 +11,68 @@
   JNIEXPORT return_type JNICALL              \
       Java_org_xproger_openlara_Wrapper_##method_name
 
+// multi-threading
+void* osMutexInit() {
+    pthread_mutex_t *mutex = new pthread_mutex_t();
+    pthread_mutex_init(mutex, NULL);
+    return mutex;
+}
+
+void osMutexFree(void *obj) {
+    pthread_mutex_destroy((pthread_mutex_t*)obj);
+    delete (pthread_mutex_t*)obj;
+}
+
+void osMutexLock(void *obj) {
+    pthread_mutex_lock((pthread_mutex_t*)obj);
+}
+
+void osMutexUnlock(void *obj) {
+    pthread_mutex_unlock((pthread_mutex_t*)obj);
+}
+
+void* osRWLockInit() {
+    pthread_rwlock_t *lock = new pthread_rwlock_t();
+    pthread_rwlock_init(lock, NULL);
+    return lock;
+}
+
+void osRWLockFree(void *obj) {
+    pthread_rwlock_destroy((pthread_rwlock_t*)obj);
+    delete (pthread_rwlock_t*)obj;
+}
+
+void osRWLockRead(void *obj) {
+    pthread_rwlock_rdlock((pthread_rwlock_t*)obj);
+}
+
+void osRWUnlockRead(void *obj) {
+    pthread_rwlock_unlock((pthread_rwlock_t*)obj);
+}
+
+void osRWLockWrite(void *obj) {
+    pthread_rwlock_wrlock((pthread_rwlock_t*)obj);
+}
+
+void osRWUnlockWrite(void *obj) {
+    pthread_rwlock_unlock((pthread_rwlock_t*)obj);
+}
+
+
+// timing
 time_t startTime;
 
-int getTime() {
+int osGetTime() {
     timeval t;
     gettimeofday(&t, NULL);
     return int((t.tv_sec - startTime) * 1000 + t.tv_usec / 1000);
 }
 
-extern "C" {
+bool osSave(const char *name, const void *data, int size) {
+    return false;
+}
 
-int lastTime;
+extern "C" {
 
 char Stream::cacheDir[255];
 char Stream::contentDir[255];
@@ -49,12 +101,10 @@ JNI_METHOD(void, nativeInit)(JNIEnv* env, jobject obj, jstring contentDir, jstri
     env->ReleaseStringUTFChars(cacheDir, str);
 
     Game::init();
-
-    lastTime = getTime();
 }
 
 JNI_METHOD(void, nativeFree)(JNIEnv* env) {
-    Game::free();
+    Game::deinit();
 }
 
 JNI_METHOD(void, nativeReset)(JNIEnv* env) {
@@ -62,11 +112,7 @@ JNI_METHOD(void, nativeReset)(JNIEnv* env) {
 }
 
 JNI_METHOD(void, nativeUpdate)(JNIEnv* env) {
-    int time = getTime();
-    if (time == lastTime)
-        return;
-    Game::update((time - lastTime) * 0.001f);
-    lastTime = time;
+    Game::update();
 }
 
 JNI_METHOD(void, nativeRender)(JNIEnv* env) {

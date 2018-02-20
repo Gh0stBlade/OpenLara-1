@@ -12,6 +12,7 @@ enum StringID {
     , STR_HELP_TEXT
     , STR_OFF
     , STR_ON
+    , STR_SPLIT
     , STR_QUALITY_LOW
     , STR_QUALITY_MEDIUM
     , STR_QUALITY_HIGH
@@ -24,6 +25,7 @@ enum StringID {
     , STR_GAME
     , STR_MAP
     , STR_COMPASS
+    , STR_STOPWATCH
     , STR_HOME
     , STR_DETAIL
     , STR_SOUND
@@ -43,6 +45,7 @@ enum StringID {
     , STR_OPT_DETAIL_LIGHTING
     , STR_OPT_DETAIL_SHADOWS
     , STR_OPT_DETAIL_WATER
+    , STR_OPT_DETAIL_VSYNC
     , STR_OPT_DETAIL_STEREO
 // sound options
     , STR_SET_VOLUMES
@@ -68,6 +71,7 @@ enum StringID {
 
 const char *helpText = 
     "Controls gamepad, touch and keyboard:@"
+    " Enter, Start (gamepad) - add second player or restore Lara@"
     " H - Show or hide this help@"
     " TAB - Inventory@"
     " LEFT - Left@"
@@ -102,6 +106,7 @@ const char *STR[STR_MAX] = {
     , helpText
     , "Off"
     , "On"
+    , "Split Screen"
     , "Low"
     , "Medium"
     , "High"
@@ -114,6 +119,7 @@ const char *STR[STR_MAX] = {
     , "Game"
     , "Map"
     , "Compass"
+    , "Statistics"
     , "Lara's Home"
     , "Detail Levels"
     , "Sound"
@@ -133,6 +139,7 @@ const char *STR[STR_MAX] = {
     , "Lighting"
     , "Shadows"
     , "Water"
+    , "VSync"
     , "Stereo"
 // sound options
     , "Set Volumes"
@@ -157,14 +164,15 @@ const char *STR[STR_MAX] = {
 
 namespace UI {
     IGame *game;
-    float width;
+    float width, height;
     float helpTipTime;
     bool  showHelp;
 
     const static uint8 char_width[110] = {
-        14, 11, 11, 11, 11, 11, 11, 13, 8, 11, 12, 11, 13, 13, 12, 11, 12, 12, 11, 12, 13, 13, 13, 12, 
-        12, 11, 9, 9, 9, 9, 9, 9, 9, 9, 5, 9, 9, 5, 12, 10, 9, 9, 9, 8, 9, 8, 9, 9, 11, 9, 9, 9, 12, 8,
-        10, 10, 10, 10, 10, 9, 10, 10, 5, 5, 5, 11, 9, 10, 8, 6, 6, 7, 7, 3, 11, 8, 13, 16, 9, 4, 12, 12, 
+        14, 11, 11, 11, 11, 11, 11, 13, 8, 11, 12, 11, 13, 13, 12, 11, 12, 12, 11, 12, 13, 13, 13, 12, 12, 11, // A-Z
+        9, 9, 9, 9, 9, 9, 9, 9, 5, 9, 9, 5, 12, 10, 9, 9, 9, 8, 9, 8, 9, 9, 11, 9, 9, 9, // a-z
+        12, 8, 10, 10, 10, 10, 10, 9, 10, 10, // 0-9
+        5, 5, 5, 11, 9, 10, 8, 6, 6, 7, 7, 3, 11, 8, 13, 16, 9, 4, 12, 12, 
         7, 5, 7, 7, 7, 7, 7, 7, 7, 7, 16, 14, 14, 14, 16, 16, 16, 16, 16, 12, 14, 8, 8, 8, 8, 8, 8, 8 }; 
         
     static const uint8 char_map[102] = {
@@ -214,12 +222,24 @@ namespace UI {
         BAR_MAX,
     };
 
-    struct {
+    struct Buffer {
         Vertex  vertices[MAX_CHARS * 4];
         Index   indices[MAX_CHARS * 6];
         int     iCount;
         int     vCount;
     } buffer;
+
+    #ifdef SPLIT_BY_TILE
+        uint16 curTile, curClut;
+    #endif
+
+    void updateAspect(float aspect) {
+        height = 480.0f;
+        width  = height * aspect;
+        Core::mProj = mat4(0.0f, width, height, 0.0f, 0.0f, 1.0f);
+        Core::setViewProj(Core::mView, Core::mProj);
+        Core::active.shader->setParam(uViewProj, Core::mViewProj);
+    }
 
     void begin() {
         Core::setDepthTest(false);
@@ -227,19 +247,26 @@ namespace UI {
         Core::setCulling(cfNone);
         game->setupBinding();
 
-        float aspect = float(Core::width) / float(Core::height);
-        width = 480 * aspect;
-        Core::mViewProj = mat4(0.0f, width, 480, 0.0f, 0.0f, 1.0f);
+        Core::mView.identity();
+        Core::mModel.identity();
 
         game->setShader(Core::passGUI, Shader::DEFAULT);
-        Core::active.shader->setParam(uMaterial, vec4(1));
+        Core::setMaterial(1, 1, 1, 1);
         Core::active.shader->setParam(uPosScale, vec4(0, 0, 1, 1));
 
         buffer.iCount = buffer.vCount = 0;
+
+        #ifdef SPLIT_BY_TILE
+            curTile = curClut = 0xFFFF;
+        #endif
     }
 
     void flush() {
         if (buffer.iCount > 0) {
+        #ifdef SPLIT_BY_TILE
+            if (curTile != 0xFFFF)
+                game->getAtlas()->bind(curTile, curClut);
+        #endif
             game->getMesh()->renderBuffer(buffer.indices, buffer.iCount, buffer.vertices, buffer.vCount);
             buffer.iCount = buffer.vCount = 0;
         }
@@ -252,12 +279,21 @@ namespace UI {
         Core::setDepthTest(true);
     }
 
-    void textOut(const vec2 &pos, const char *text, Align align = aLeft, float width = 0) {        
+    enum ShadeType {
+        SHADE_NONE   = 0,
+        SHADE_ORANGE = 1,
+        SHADE_GRAY   = 2,
+    };
+
+    void textOut(const vec2 &pos, const char *text, Align align = aLeft, float width = 0, ShadeType shade = SHADE_ORANGE, bool isShadow = false) {
         if (!text) return;
        
         TR::Level *level = game->getLevel();
-        MeshBuilder *mesh = game->getMesh();
 
+        if (shade && !isShadow && ((level->version & TR::VER_TR3)))
+            textOut(pos + vec2(1, 1), text, align, width, shade, true);
+
+        MeshBuilder *mesh = game->getMesh();
         int seq = level->extra.glyphs;
 
         int x = int(pos.x);
@@ -289,14 +325,46 @@ namespace UI {
                 flush();
 
             TR::SpriteTexture &sprite = level->spriteTextures[level->spriteSequences[seq].sStart + frame];
-            mesh->addSprite(buffer.indices, buffer.vertices, buffer.iCount, buffer.vCount, 0, x, y, 0, sprite, 255, true);
+
+            TR::Color32 tColor, bColor;
+            if (isShadow) {
+                tColor = bColor = TR::Color32(0, 0, 0, 255);
+            } else {
+                tColor = bColor = TR::Color32(255, 255, 255, 255);
+
+                if (shade && ((level->version & TR::VER_TR3))) {
+                    if (shade == SHADE_ORANGE) {
+                        tColor = TR::Color32(255, 190, 90, 255);
+                        bColor = TR::Color32(140, 50, 10, 255);
+                    }
+                    if (shade == SHADE_GRAY) {
+                        tColor = TR::Color32(255, 255, 255, 255);
+                        bColor = TR::Color32(128, 128, 128, 255);
+                    }
+                }
+            }
+
+            #ifdef SPLIT_BY_TILE
+                if (sprite.tile != curTile
+                    #ifdef SPLIT_BY_CLUT
+                        || sprite.clut != curClut
+                    #endif
+                ) {
+                    flush();
+                    curTile = sprite.tile;
+                    curClut = sprite.clut;
+                }
+            #endif
+
+
+            mesh->addSprite(buffer.indices, buffer.vertices, buffer.iCount, buffer.vCount, 0, x, y, 0, sprite, tColor, bColor, true);
 
             x += char_width[frame] + 1;
         }
     }
 
-    void textOut(const vec2 &pos, StringID str, Align align = aLeft, float width = 0) {
-        textOut(pos, STR[str], align, width);
+    void textOut(const vec2 &pos, StringID str, Align align = aLeft, float width = 0, ShadeType shade = SHADE_ORANGE) {
+        textOut(pos, STR[str], align, width, shade);
     }
 
     void specOut(const vec2 &pos, char specChar) {
@@ -309,7 +377,20 @@ namespace UI {
             flush();
 
         TR::SpriteTexture &sprite = level->spriteTextures[level->spriteSequences[seq].sStart + specChar];
-        mesh->addSprite(buffer.indices, buffer.vertices, buffer.iCount, buffer.vCount, 0, int(pos.x), int(pos.y), 0, sprite, 255, true);
+
+        #ifdef SPLIT_BY_TILE
+            if (sprite.tile != curTile
+                #ifdef SPLIT_BY_CLUT
+                    || sprite.clut != curClut
+                #endif
+            ) {
+                flush();
+                curTile = sprite.tile;
+                curClut = sprite.clut;
+            }
+        #endif
+
+        mesh->addSprite(buffer.indices, buffer.vertices, buffer.iCount, buffer.vCount, 0, int(pos.x), int(pos.y), 0, sprite, TR::Color32(255, 255, 255, 255), TR::Color32(255, 255, 255, 255), true);
     }
 
     #undef MAX_CHARS
@@ -399,11 +480,12 @@ namespace UI {
     }
 
     void renderHelp() {
+        // TODO: Core::eye offset
         if (showHelp)
-            textOut(vec2(0, 64), STR_HELP_TEXT, aRight, width - 32);
+            textOut(vec2(0, 32), STR_HELP_TEXT, aRight, width - 32, UI::SHADE_GRAY);
         else
             if (helpTipTime > 0.0f)
-                textOut(vec2(0, 480 - 32), STR_HELP_PRESS, aCenter, width);
+                textOut(vec2(0, height - 32), STR_HELP_PRESS, aCenter, width, UI::SHADE_ORANGE);
     }
 };
 

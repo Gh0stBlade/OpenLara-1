@@ -10,8 +10,14 @@ struct Character : Controller {
     quat    rotHead, rotChest;
 
     enum Stand { 
-        STAND_AIR, STAND_GROUND, STAND_SLIDE, STAND_HANG, STAND_UNDERWATER, STAND_ONWATER
+        STAND_AIR,
+        STAND_GROUND,
+        STAND_SLIDE,
+        STAND_HANG,
+        STAND_UNDERWATER,
+        STAND_ONWATER
     }       stand;
+
     int     input, lastInput;
 
     enum Key {  
@@ -59,7 +65,24 @@ struct Character : Controller {
         updateZone();
     }
 
+    virtual int getRoomIndex() const {
+        int index = Controller::getRoomIndex();
+        
+        if (level->isCutsceneLevel())
+            return index;
+        
+        TR::Level::FloorInfo info;
+        getFloorInfo(index, pos, info);
+
+        if (level->rooms[index].flags.water && info.roomAbove != TR::NO_ROOM && (info.floor - level->rooms[index].info.yTop) <= 512)
+            return info.roomAbove;
+        return index;
+    }
+
     bool updateZone() {
+        if (level->isCutsceneLevel())
+            return false;
+
         int dx, dz;
         TR::Room::Sector &s = level->getSector(getRoomIndex(), int(pos.x), int(pos.z), dx, dz);
         if (s.boxIndex == 0xFFFF)
@@ -125,25 +148,25 @@ struct Character : Controller {
     virtual int   getStateDeath()       { return state; }
     virtual int   getStateDefault()     { return state; }
     virtual int   getInput()            { return health <= 0 ? DEATH : 0; }
+    virtual bool  useHeadAnimation()    { return false; }
+
+    int getNextState() {
+        if (input & DEATH)
+            return getStateDeath();
+
+        switch (stand) {
+            case STAND_AIR        : return getStateAir();
+            case STAND_GROUND     : return getStateGround();
+            case STAND_SLIDE      : return getStateSlide();
+            case STAND_HANG       : return getStateHang();
+            case STAND_UNDERWATER : return getStateUnderwater();
+            case STAND_ONWATER    : return getStateOnwater();
+        }
+        return animation.state;
+    }
 
     virtual void updateState() {
-        int state = animation.state;
-
-        if (input & DEATH)
-            state = getStateDeath();        
-        else if (stand == STAND_GROUND)
-            state = getStateGround();
-        else if (stand == STAND_SLIDE)
-            state = getStateSlide();
-        else if (stand == STAND_HANG)
-            state = getStateHang();
-        else if (stand == STAND_AIR)
-            state = getStateAir();
-        else if (stand == STAND_UNDERWATER)
-            state = getStateUnderwater();
-        else
-            state = getStateOnwater();            
-
+        int state = getNextState();
         // try to set new state
         if (!animation.setState(state))
             animation.setState(getStateDefault());
@@ -198,8 +221,8 @@ struct Character : Controller {
         stand = STAND_AIR;
     }
 
-    vec3 getViewPoint() {
-        return animation.getJoints(getMatrix(), jointChest).pos;
+    vec3 getViewPoint() { // TOOD: remove this
+        return getJoint(jointChest).pos;
     }
 
     virtual void lookAt(Controller *target) {

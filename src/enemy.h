@@ -77,17 +77,20 @@ struct Enemy : Character {
         delete path;
     }
 
-    virtual void getSaveData(TR::SaveGame::Entity &data) {
+    virtual bool getSaveData(TR::SaveGame::Entity &data) {
         Character::getSaveData(data);
         data.extraSize = sizeof(data.extra.enemy);
-        data.extra.enemy.health = uint16(health);
-        data.extra.enemy.mood   = uint16(mood);
+        data.extra.enemy.health    = health;
+        data.extra.enemy.mood      = mood;
+        data.extra.enemy.targetBox = targetBox;
+        return true;
     }
 
     virtual void setSaveData(const TR::SaveGame::Entity &data) {
         Character::setSaveData(data);
-        health = float(data.extra.enemy.health);
-        mood   = Mood(data.extra.enemy.mood);
+        health    = data.extra.enemy.health;
+        mood      = Mood(data.extra.enemy.mood);
+        targetBox = data.extra.enemy.targetBox;
     }
 
     virtual bool activate() {
@@ -287,20 +290,12 @@ struct Enemy : Character {
     }
     
     bool think(bool fixedLogic) {
-        if (!target)
-            target = (Character*)game->getLara();
-
         thinkTime += Core::deltaTime;
         if (thinkTime < 1.0f / 30.0f)
             return false;
         thinkTime -= 1.0f / 30.0f;
 
-        if (!target) {
-            mood = MOOD_SLEEP;
-            targetDist  = +INF;
-            targetInView = targetFromView = targetCanAttack = false;
-            return true;
-        }
+        target = (Character*)game->getLara(pos);
 
         vec3 targetVec  = target->pos - pos - getDir() * length;
         targetDist      = targetVec.length();
@@ -409,7 +404,7 @@ struct Enemy : Character {
             return false;
 
         TR::Box    &b = game->getLevel()->boxes[box];
-        TR::Entity::Type type = getEntity().type;
+        uint16   type = getEntity().type;
 
         if (b.overlap.block)
             return false;
@@ -587,7 +582,7 @@ struct Wolf : Enemy {
             case STATE_ATTACK :
             case STATE_BITE   :
                 if (nextState == STATE_NONE && targetInView && (collide(target) & HIT_MASK)) {
-                    bite(animation.getJoints(getMatrix(), jointHead, true).pos, state == STATE_ATTACK ? 50.0f : 100.0f);
+                    bite(getJoint(jointHead).pos, state == STATE_ATTACK ? 50.0f : 100.0f);
                     nextState = state == STATE_ATTACK ? STATE_RUN : STATE_GROWL;
                 }
                 return state == STATE_ATTACK ? STATE_RUN : state;
@@ -748,7 +743,7 @@ struct Bear : Enemy {
             case STATE_BITE     :
             case STATE_ATTACK   :
                 if (nextState == STATE_NONE && (collide(target) & HIT_MASK)) {
-                    bite(animation.getJoints(getMatrix(), jointHead, true).pos, state == STATE_BITE ? 200.0f : 400.0f);
+                    bite(getJoint(jointHead).pos, state == STATE_BITE ? 200.0f : 400.0f);
                     nextState = state == STATE_BITE ? STATE_STOP : STATE_HOWL;
                 }
                 break;
@@ -829,7 +824,7 @@ struct Bat : Enemy {
                     mood = MOOD_SLEEP;
                     return STATE_FLY;
                 } else
-                    bite(animation.getJoints(getMatrix(), jointHead, true).pos, 2);
+                    bite(getJoint(jointHead).pos, 2);
                 break;
             case STATE_FLY    : 
                 if (collide(target)) {
@@ -1068,7 +1063,7 @@ struct Raptor : Enemy {
             case STATE_ATTACK_2 :
             case STATE_BITE     :
                 if (nextState == STATE_NONE && targetInView && (mask & HIT_MASK)) {
-                    bite(animation.getJoints(getMatrix(), jointHead, true).pos, 100);                    
+                    bite(getJoint(jointHead).pos, 100);                    
                     nextState = state == STATE_ATTACK_2 ? STATE_RUN : STATE_STOP;
                 }
                 break;
@@ -1229,7 +1224,7 @@ struct Mummy : Enemy {
     }
 
     virtual void update() {
-        if (state == STATE_IDLE && (health <= 0.0f || collide((Controller*)level->laraController))) {
+        if (state == STATE_IDLE && (health <= 0.0f || collide(game->getLara(pos)))) {
             animation.setState(STATE_FALL);
             health = 0.0f;
         }
@@ -1263,17 +1258,17 @@ struct Doppelganger : Enemy {
     }
 
     virtual void hit(float damage, Controller *enemy = NULL, TR::HitType hitType = TR::HIT_DEFAULT) {
-        Character *lara = (Character*)game->getLara();
-        lara->hit(damage * 10, this);
+        enemy->hit(damage * 10, this);
     };
 
     virtual void update() {
-        Character *lara = (Character*)game->getLara();
+        if (!target)
+            target = (Character*)game->getLara(pos);
 
         if (stand != STAND_AIR) {
-            pos      = DOPPELGANGER_ROOM_CENTER * 2.0f - lara->pos;
-            pos.y    = lara->pos.y;
-            angle    = lara->angle;
+            pos      = DOPPELGANGER_ROOM_CENTER * 2.0f - target->pos;
+            pos.y    = target->pos.y;
+            angle    = target->angle;
             angle.y -= PI;
         }
 
@@ -1282,8 +1277,8 @@ struct Doppelganger : Enemy {
         TR::Level::FloorInfo info;
         getFloorInfo(getRoomIndex(), pos, info);
 
-        if (stand != STAND_AIR && lara->stand == Character::STAND_GROUND && pos.y < info.floor - 1024) {
-            animation = Animation(level, lara->getModel());
+        if (stand != STAND_AIR && target->stand == Character::STAND_GROUND && pos.y < info.floor - 1024) {
+            animation = Animation(level, target->getModel());
             animation.setAnim(ANIM_FALL, 1);
             stand = STAND_AIR;
             velocity.x = velocity.y = 0.0f;
@@ -1300,9 +1295,9 @@ struct Doppelganger : Enemy {
                 pos += velocity * (30.0f * Core::deltaTime);
             }
         } else {
-            animation.frameA = lara->animation.frameA;
-            animation.frameB = lara->animation.frameB;
-            animation.delta  = lara->animation.delta;
+            animation.frameA = target->animation.frameA;
+            animation.frameB = target->animation.frameB;
+            animation.delta  = target->animation.delta;
         }
     }
 
@@ -1321,9 +1316,7 @@ struct Doppelganger : Enemy {
 
 
 struct ScionTarget : Enemy {
-    float timer;
-
-    ScionTarget(IGame *game, int entity) : Enemy(game, entity, 5, 0, 0, 0), timer(0.0f) {}
+    ScionTarget(IGame *game, int entity) : Enemy(game, entity, 5, 0, 0, 0) {}
 
     virtual void update() {
         Controller::update();
@@ -1461,6 +1454,30 @@ struct MrT : Human {
 struct Natla : Human {
 
     Natla(IGame *game, int entity) : Human(game, entity, 400) {}
+};
+
+struct Dog : Enemy {
+
+    enum {
+        ANIM_SLEEP = 5,
+        ANIM_DEATH = 13,
+    };
+
+    enum {
+        STATE_DEATH = 10,
+    };
+
+    Dog(IGame *game, int entity) : Enemy(game, entity, 6, 10, 0.0f, 0.0f) {
+        jointChest = 19;
+        jointHead  = 20;
+        animation.setAnim(ANIM_SLEEP);
+    }
+
+    virtual int getStateDeath() {
+        if (state != STATE_DEATH)
+            return animation.setAnim(ANIM_DEATH);
+        return state;
+    }
 };
 
 #endif

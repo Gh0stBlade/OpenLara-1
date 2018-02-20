@@ -38,7 +38,6 @@ namespace Game {
         nextLevel = NULL;
 
         Core::init();
-
         shaderCache = new ShaderCache();
 
         UI::init(level);
@@ -49,12 +48,25 @@ namespace Game {
         startLevel(lvl);
     }
 
-    void init(char *lvlName = NULL, char *sndName = NULL) {
-        if (!lvlName) lvlName = (char*)"level/TITLE.PSX";
-        init(new Stream(lvlName));
+    void init(const char *lvlName = NULL) {
+        #ifdef _DEBUG
+            Debug::init();
+        #endif
+        char fileName[255];
+
+        TR::Version version = TR::getGameVersion();
+        if (!lvlName)
+            TR::getGameLevelFile(fileName, version, TR::getTitleId(version));
+        else
+            strcpy(fileName, lvlName);
+
+        init(new Stream(fileName));
     }
 
     void deinit() {
+        #ifdef _DEBUG
+            Debug::deinit();
+        #endif
         delete level;
         UI::deinit();
         delete shaderCache;
@@ -75,8 +87,13 @@ namespace Game {
         Core::deltaTime = dt;
     }
 
-    void update(float delta) {
+    bool update() {
         PROFILE_MARKER("UPDATE");
+
+        if (!Core::update())
+            return false;
+
+        float delta = Core::deltaTime;
 
         if (nextLevel) {
             startLevel(nextLevel);
@@ -84,7 +101,7 @@ namespace Game {
         }
 
         if (level->isEnded)
-            return;
+            return true;
 
         Input::update();
 
@@ -96,7 +113,7 @@ namespace Game {
         }
 
         if (Input::down[ikS]) {
-            if (level->lara->canSaveGame())
+            if (level->players[0]->canSaveGame())
                 level->saveGame(0);
             Input::down[ikS] = false;
         }
@@ -106,14 +123,23 @@ namespace Game {
             Input::down[ikL] = false;
         }
 
-        Core::deltaTime = delta = min(0.2f, delta);
-        UI::update();
+        if (!level->level.isTitle()) {
+            if (Input::state[0][cStart]) level->addPlayer(0);
+            if (Input::state[1][cStart]) level->addPlayer(1);
+        }
+
+        if (!level->level.isCutsceneLevel())
+            delta = min(0.2f, delta);
 
         while (delta > EPS) {
             Core::deltaTime = min(delta, 1.0f / 30.0f);
             Game::updateTick();
             delta -= Core::deltaTime;
+            if (Core::resetState) // resetTime was called
+                break;
         }
+
+        return true;
     }
 
     void render() {

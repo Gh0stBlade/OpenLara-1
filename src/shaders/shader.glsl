@@ -27,15 +27,16 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 #ifndef PASS_SHADOW
 	varying vec4 vViewVec;  // xyz - dir * dist, w - coord.y
 	varying vec4 vDiffuse;
+	varying vec4 vNormal;	// xyz - normal dir, w - blend mode (0 - alpha, 1 - additive blend)
 
 	#ifndef TYPE_FLASH
 		#ifdef PASS_COMPOSE
-			varying vec3 vNormal;		// xyz - normal dir
 			varying vec4 vLightProj;
 			varying vec4 vLightVec;		// xyz - dir, w - fog factor
 
 			#ifdef OPT_SHADOW
 				varying vec3 vAmbient;
+				varying vec4 vLightMap;
 			#endif
 		#endif
 
@@ -71,13 +72,11 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 	attribute vec4 aCoord;
 	attribute vec4 aTexCoord;
 	attribute vec4 aParam;
-
-	#ifndef PASS_AMBIENT
-		attribute vec4 aNormal;
-	#endif
+	attribute vec4 aNormal;
 
 	#ifndef PASS_SHADOW
 		attribute vec4 aColor;
+		attribute vec4 aLight;
 	#endif
 
 	vec3 mulQuat(vec4 q, vec3 v) {
@@ -100,8 +99,8 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 
 		vec4 coord;
 		coord.w = rBasisPos.w; // visible flag
-		#ifdef TYPE_SPRITE
-			coord.xyz = mulBasis(rBasisRot, rBasisPos.xyz + aCoord.xyz, vec3(aTexCoord.z, -aTexCoord.w, 0.0) * 32767.0);
+		#if defined(TYPE_SPRITE) && defined(ALIGN_SPRITES)
+			coord.xyz = mulBasis(rBasisRot, rBasisPos.xyz + aCoord.xyz, vec3(aTexCoord.z, aTexCoord.w, 0.0) * 32767.0);
 		#else
 			coord.xyz = mulBasis(rBasisRot, rBasisPos.xyz, aCoord.xyz);
 		#endif
@@ -110,12 +109,17 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 			vViewVec = vec4((uViewPos - coord.xyz) * FOG_DIST, coord.y);
 		#endif
 
+		#ifdef PASS_AMBIENT
+			vNormal = aNormal;
+		#endif
+
 		#if defined(PASS_COMPOSE) && !defined(TYPE_FLASH)
 			#ifdef TYPE_SPRITE
 				vNormal.xyz = normalize(vViewVec.xyz);
 			#else
 				vNormal.xyz = normalize(mulQuat(rBasisRot, aNormal.xyz));
 			#endif
+			vNormal.w = aNormal.w;
 
 			float fog;
 			#ifdef UNDERWATER
@@ -140,7 +144,7 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 
 	void _diffuse() {
 		#ifndef PASS_SHADOW
-			vDiffuse = vec4(aColor.xyz * (uMaterial.x * 2.0), uMaterial.w);
+			vDiffuse = vec4(aColor.xyz * (uMaterial.x * 1.8), uMaterial.w);
 
 			#ifdef UNDERWATER
 				vDiffuse.xyz *= UNDERWATER_COLOR;
@@ -171,7 +175,7 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 					lum.x = dot(vNormal.xyz, normalize(lv0));
 					att.x = dot(lv0, lv0);
 				#else
-					lum.x = aColor.w;
+					lum.x = 1.0;
 					att.x = 0.0;
 
 					#ifdef TYPE_SPRITE
@@ -197,27 +201,28 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 						ambient = vec3(uMaterial.y);
 					#endif
 				#else
-					ambient = vec3(min(uMaterial.y, light.x));
+					ambient = min(uMaterial.yyy, aLight.xyz);
 				#endif
 
 				#ifdef OPT_SHADOW
-					vAmbient = ambient;
-					vLight   = light;
+					vAmbient   = ambient;
+					vLight     = light;
+					vLightMap  = aLight * light.x;
 				#else
-					vLight.w   = 0.0;
 					vLight.xyz = uLightColor[1].xyz * light.y + uLightColor[2].xyz * light.z + uLightColor[3].xyz * light.w;
+					vLight.w = 0.0;
 
 					#ifdef TYPE_ENTITY
 						vLight.xyz += ambient + uLightColor[0].xyz * light.x;
 					#else
-						vLight.xyz += light.x;
+						vLight.xyz += aLight.xyz * light.x;
 					#endif
 				#endif
 
 			#endif
 
 			#ifdef PASS_AMBIENT
-				vLight = aColor.wwww;
+				vLight = vec4(aLight.xyz, 1.0);
 			#endif
 		#endif
 	}
@@ -408,7 +413,8 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 		#endif
 
 		#ifdef ALPHA_TEST
-			if (color.w <= 0.8)
+//color = vec4(1, 0, 0, 1);
+			if (color.w <= 0.5)
 				discard;
 		#endif
 
@@ -426,7 +432,7 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 			#if !defined(TYPE_FLASH) && !defined(TYPE_MIRROR)
 
 				#ifdef PASS_AMBIENT
-					color.xyz *= vLight.x;
+					color.xyz *= vLight.xyz;
 				#endif
 
 				#ifdef PASS_COMPOSE
@@ -450,12 +456,13 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 						#endif
 
 						#ifdef TYPE_ROOM
-							light += mix(vAmbient.x, vLight.x, rShadow);
+							light += mix(vAmbient.xyz, vLightMap.xyz, rShadow);
 						#endif
 
 						#ifdef TYPE_SPRITE
-							light += vLight.x;
+							light += vLightMap.xyz;
 						#endif
+
 					#else
 						vec3 light = vLight.xyz;
 					#endif
@@ -486,7 +493,13 @@ uniform vec4 uMaterial;	// x - diffuse, y - ambient, z - specular, w - alpha
 				color.w = 1.0;
 */
 			#endif
-			gl_FragColor = color;
+
+			#ifdef TYPE_PARTICLE_SPRITE
+				gl_FragColor = vec4(color.xyz * max(1.0 - vNormal.w, color.w), color.w * vNormal.w); // premultiplied
+			#else
+				gl_FragColor = color;
+			#endif
+
 		#endif
 	}
 #endif

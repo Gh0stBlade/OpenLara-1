@@ -15,9 +15,7 @@ struct Sprite : Controller {
     float time;
     vec3  velocity;
 
-    BlendMode blendMode;
-
-    Sprite(IGame *game, int entity, bool instant = true, int frame = FRAME_ANIMATED) : Controller(game, entity), instant(instant), flag(frame), time(0), velocity(0), blendMode(bmAlpha) {
+    Sprite(IGame *game, int entity, bool instant = true, int frame = FRAME_ANIMATED) : Controller(game, entity), instant(instant), flag(frame), time(0), velocity(0) {
         if (frame >= 0) { // specific frame
             this->frame = frame;
         } else if (frame == FRAME_RANDOM) { // random frame
@@ -55,10 +53,16 @@ struct Sprite : Controller {
     }
 
     virtual void render(Frustum *frustum, MeshBuilder *mesh, Shader::Type type, bool caustics) {
-        Core::setBlending(blendMode);
-        Core::active.shader->setParam(uBasis, Basis(Core::mViewInv.getRot(), pos));
+        Basis b;
+        b.w   = 1.0f;
+        b.pos = pos;
+        #ifdef MERGE_SPRITES
+            b.rot = Core::mViewInv.getRot();
+        #else
+            b.rot = quat(0, 0, 0, 1);
+        #endif
+        Core::setBasis(&b, 1);
         mesh->renderSprite(-(getEntity().modelIndex + 1), frame);
-        Core::setBlending(bmNone);
     }
 };
 

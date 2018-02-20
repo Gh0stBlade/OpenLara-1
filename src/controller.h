@@ -17,16 +17,34 @@
 struct Controller;
 
 struct ICamera {
-    vec4  *reflectPlane;
-    vec3  pos;
-    float shake;
-    bool  firstPerson;
+    enum Mode {
+        MODE_FOLLOW,
+        MODE_STATIC,
+        MODE_LOOK,
+        MODE_COMBAT,
+        MODE_CUTSCENE,
+        MODE_HEAVY,
+    } mode;
 
-    ICamera() : reflectPlane(NULL), pos(0.0f), shake(0.0f) {}
+    int          cameraIndex;
+    vec4         *reflectPlane;
+    vec3         angle;
+    float        shake;
+    bool         firstPerson;
+    bool         centerView;
+    TR::Location eye, target;
+
+    ICamera() : cameraIndex(0), reflectPlane(NULL), angle(0.0f), shake(0.0f), centerView(false) {}
 
     virtual void setup(bool calcMatrices) {}
     virtual int  getRoomIndex() const { return TR::NO_ROOM; }
     virtual void doCutscene(const vec3 &pos, float rotation) {}
+    virtual Controller* getOwner() { return NULL; }
+
+    void setAngle(float x, float y) {
+        angle.x = x * DEG2RAD;
+        angle.y = y * DEG2RAD;
+    }
 };
 
 struct IGame {
@@ -39,8 +57,10 @@ struct IGame {
 
     virtual TR::Level*   getLevel()     { return NULL; }
     virtual MeshBuilder* getMesh()      { return NULL; }
+    virtual Texture*     getAtlas()     { return NULL; }
     virtual ICamera*     getCamera()    { return NULL; }
-    virtual Controller*  getLara()      { return NULL; }
+    virtual Controller*  getLara(int index = 0)   { return NULL; }
+    virtual Controller*  getLara(const vec3 &pos) { return NULL; }
     virtual bool         isCutscene()   { return false; }
     virtual uint16       getRandomBox(uint16 zone, uint16 *zones) { return 0; }
     virtual uint16       findPath(int ascend, int descend, bool big, int boxStart, int boxEnd, uint16 *zones, uint16 **boxes) { return 0; }
@@ -52,18 +72,19 @@ struct IGame {
     virtual void setupBinding() {}
     virtual void renderEnvironment(int roomIndex, const vec3 &pos, Texture **targets, int stride = 0, Core::Pass pass = Core::passAmbient) {}
     virtual void renderCompose(int roomIndex) {}
-    virtual void renderView(int roomIndex, bool water) {}
-    virtual void setEffect(Controller *controller, TR::Effect effect) {}
+    virtual void renderView(int roomIndex, bool water, bool showUI) {}
+    virtual void renderGame(bool showUI) {}
+    virtual void setEffect(Controller *controller, TR::Effect::Type effect) {}
 
     virtual void checkTrigger(Controller *controller, bool heavy) {}
 
     virtual Controller* addEntity(TR::Entity::Type type, int room, const vec3 &pos, float angle = 0.0f) { return NULL; }
     virtual void removeEntity(Controller *controller) {}
 
-    virtual bool invUse(TR::Entity::Type type) { return false; }
+    virtual bool invUse(int playerIndex, TR::Entity::Type type) { return false; }
     virtual void invAdd(TR::Entity::Type type, int count = 1) {}
     virtual int* invCount(TR::Entity::Type type) { return NULL; }
-    virtual bool invChooseKey(TR::Entity::Type hole) { return false; }
+    virtual bool invChooseKey(int playerIndex, TR::Entity::Type hole) { return false; }
 
     virtual Sound::Sample* playSound(int id, const vec3 &pos = vec3(0.0f), int flags = 0) const { return NULL; }
     virtual void playTrack(uint8 track, bool restart = false) {}
@@ -89,7 +110,7 @@ struct Controller {
     TR::Entity::Flags flags;
 
     Basis   *joints;
-    int     frameIndex;
+    int     jointsFrame;
 
     vec3    ambient[6];
     float   specular;
@@ -114,9 +135,10 @@ struct Controller {
         int   roomIndex;
     } *explodeParts;
 
+    vec3 lastPos;
     bool invertAim;
 
-    Controller(IGame *game, int entity) : next(NULL), game(game), level(game->getLevel()), entity(entity), animation(level, getModel()), state(animation.state), layers(0), explodeMask(0), explodeParts(0), invertAim(false) {
+    Controller(IGame *game, int entity) : next(NULL), game(game), level(game->getLevel()), entity(entity), animation(level, getModel()), state(animation.state), layers(0), explodeMask(0), explodeParts(0), lastPos(0), invertAim(false) {
         const TR::Entity &e = getEntity();
         pos         = vec3(float(e.x), float(e.y), float(e.z));
         angle       = vec3(0.0f, e.rotation, 0.0f);
@@ -125,8 +147,12 @@ struct Controller {
         flags.state = TR::Entity::asNone;
 
         const TR::Model *m = getModel();
-        joints     = m ? new Basis[m->mCount] : NULL;
-        frameIndex = -1;
+        joints      = m ? new Basis[m->mCount] : NULL;
+        jointsFrame = -1;
+
+        if (level->isCutsceneLevel())
+            fixRoomIndex();
+
         specular   = 0.0f;
         intensity  = e.intensity == -1 ? -1.0f : intensityf(e.intensity);
         timer      = 0.0f;
@@ -157,6 +183,16 @@ struct Controller {
         deactivate(true);
     }
 
+    bool fixRoomIndex() {
+        vec3 p = getPos();
+        for (int i = 0; i < level->roomsCount; i++)
+            if (insideRoom(p, i)) {
+                roomIndex = i;
+                return true;
+            }
+        return false;
+    }
+
     void getFloorInfo(int roomIndex, const vec3 &pos, TR::Level::FloorInfo &info) const {
         int x = int(pos.x);
         int y = int(pos.y);
@@ -180,8 +216,8 @@ struct Controller {
         info.trigger      = TR::Level::Trigger::ACTIVATE;
         info.trigCmdCount = 0;
 
-        if (s.floor == TR::NO_FLOOR) 
-            return;
+        //if (s.floor == TR::NO_FLOOR) 
+        //    return;
 
         TR::Room::Sector *sBelow = &s;
         while (sBelow->roomBelow != TR::NO_ROOM) sBelow = &level->getSector(sBelow->roomBelow, x, z, dx, dz);
@@ -355,7 +391,7 @@ struct Controller {
                 }
 
                 case TR::FloorData::TRIGGER :  {
-                    info.trigger        = (TR::Level::Trigger)cmd.sub;
+                    info.trigger        = (TR::Level::Trigger::Type)cmd.sub;
                     info.trigCmdCount   = 0;
                     info.trigInfo       = (*fd++).triggerInfo;
                     TR::FloorData::TriggerCommand trigCmd;
@@ -371,13 +407,35 @@ struct Controller {
                     info.lava = true;
                     break;
 
+                case TR::FloorData::CLIMB :
+                    info.climb = cmd.sub; // climb mask
+                    break;
+
+                case 0x07 :
+                case 0x08 :
+                case 0x09 :
+                case 0x0A :
+                case 0x0B :
+                case 0x0C :
+                case 0x0D :
+                case 0x0E :
+                case 0x0F :
+                case 0x10 :
+                case 0x11 :
+                case 0x12 : fd++; break; // TODO TR3 triangulation
+
+                case 0x13 : break; // TODO TR3 monkeyswing
+
+                case 0x14 : 
+                case 0x15 : break; // TODO TR3 minecart
+
                 default : LOG("unknown func: %d\n", cmd.func);
             }
 
         } while (!cmd.end);
     }
 
-    virtual void getSaveData(TR::SaveGame::Entity &data) {
+    virtual bool getSaveData(TR::SaveGame::Entity &data) {
         const TR::Entity &e = getEntity();
         const TR::Model  *m = getModel();
         if (entity < level->entitiesBaseCount) {
@@ -403,6 +461,8 @@ struct Controller {
         data.animFrame  = m ? animation.frameIndex : 0;
 
         data.extraSize  = 0;
+
+        return true;
     }
 
     virtual void setSaveData(const TR::SaveGame::Entity &data) {
@@ -520,7 +580,7 @@ struct Controller {
             Box box = target->getBoundingBox();
             vec3 t = (box.min + box.max) * 0.5f;
 
-            Basis b = animation.getJoints(Basis(getMatrix()), joint);
+            Basis b = animation.getJoints(getMatrix(), joint);
             vec3 delta = (b.inverse() * t).normal();
             if (invertAim)
                 delta = -delta;
@@ -549,7 +609,7 @@ struct Controller {
     bool insideRoom(const vec3 &pos, int roomIndex) const {
         TR::Room &r = level->rooms[roomIndex];
         vec3 min = vec3((float)r.info.x + 1024, (float)r.info.yTop, (float)r.info.z + 1024);
-        vec3 max = min + vec3(float((r.xSectors - 1) * 1024), float(r.info.yBottom - r.info.yTop), float((r.zSectors - 1) * 1024));
+        vec3 max = min + vec3(float((r.xSectors - 2) * 1024), float(r.info.yBottom - r.info.yTop), float((r.zSectors - 2) * 1024));
 
         return  pos.x >= min.x && pos.x <= max.x &&
                 pos.y >= min.y && pos.y <= max.y &&
@@ -565,7 +625,7 @@ struct Controller {
         return level->entities[entity];
     }
 
-    const TR::Room& getRoom() const {
+    TR::Room& getRoom() {
         int index = getRoomIndex();
         ASSERT(index >= 0 && index < level->roomsCount);
         return level->rooms[index];
@@ -578,8 +638,8 @@ struct Controller {
         return index;
     }
 
-    virtual vec3& getPos() {
-        return pos;
+    virtual vec3 getPos() {
+        return getEntity().isActor() ? getJoint(0).pos : pos;
     }
 
     vec3 getDir() const {
@@ -641,13 +701,13 @@ struct Controller {
         const TR::Model *m = getModel();
         ASSERT(m->mCount <= MAX_SPHERES);
 
-        Basis basis(getMatrix());
-    // TODO: optimize (check frame index for animation updates, use joints array)
+        updateJoints();
+
         count = 0;
         for (int i = 0; i < m->mCount; i++) {
             TR::Mesh &aMesh = level->meshes[level->meshOffsets[m->mStart + i]];
             if (aMesh.radius <= 0) continue;
-            vec3 center = animation.getJoints(basis, i, true) * aMesh.center;
+            vec3 center = joints[i] * aMesh.center;
             spheres[count++] = Sphere(center, aMesh.radius);
         }
     }
@@ -771,19 +831,35 @@ struct Controller {
     virtual void  cmdEmpty()                    {}
 
     virtual void  cmdEffect(int fx) { 
-        if (fx == 18) return; // TR2 TODO MESH_SWAP1
-        if (fx == 19) return; // TR2 TODO MESH_SWAP2
-        if (fx == 20) return; // TR2 TODO MESH_SWAP3
-        if (fx == 21) flags.invisible = true;  return; // TR2 TODO INV_ON visible = false
-        if (fx == 22) flags.invisible = false; return; // TR2 TODO INV_OFF visible = true
-        if (fx == 23) return; // TR2 TODO DYN_ON
-        if (fx == 24) return; // TR2 TODO DYN_OFF
-        ASSERT(false); // not implemented
+        switch (fx) {
+            case TR::Effect::MESH_SWAP_1    : 
+            case TR::Effect::MESH_SWAP_2    : 
+            case TR::Effect::MESH_SWAP_3    : {
+                if (!layers) initMeshOverrides();
+                uint32 mask = (layers[1].mask == 0xFFFFFFFF) ? 0 : 0xFFFFFFFF;
+                meshSwap(1, level->extra.meshSwap[fx - TR::Effect::MESH_SWAP_1], mask);
+                break;
+            }
+            case TR::Effect::INV_ON         : flags.invisible = true;  break;
+            case TR::Effect::INV_OFF        : flags.invisible = false; break;
+            case TR::Effect::DYN_ON         : break; // TODO TR2
+            case TR::Effect::DYN_OFF        : break; // TODO TR2
+            case TR::Effect::FOOTPRINT      : break; // TODO TR3
+            default : ASSERT(false);
+        }
     }
 
     virtual void updateAnimation(bool commands) {
         animation.update();
-        
+
+        if (level->isCutsceneLevel() && getEntity().isActor()) {
+            vec3 p = getPos();
+            if ((p - lastPos).length2() > 256 * 256) {
+                game->waterDrop(p, 96.0, 0.1f);
+                lastPos = p;
+            }
+        }
+
         TR::Animation *anim = animation;
 
     // apply animation commands
@@ -809,14 +885,14 @@ struct Controller {
                             if (cmd == TR::ANIM_CMD_EFFECT) {
                                 switch (fx) {
                                     case TR::Effect::ROTATE_180   : angle.y = angle.y + PI; break;
-                                    case TR::Effect::FLOOR_SHAKE  : game->setEffect(this, TR::Effect(fx)); break;
+                                    case TR::Effect::FLOOR_SHAKE  : game->setEffect(this, TR::Effect::Type(fx)); break;
                                     case TR::Effect::FINISH_LEVEL : game->loadNextLevel(); break;
                                     case TR::Effect::FLIP_MAP     : level->state.flags.flipped = !level->state.flags.flipped; break;
                                     default                       : cmdEffect(fx); break;
                                 }
                             } else {
                                 if (!(sfx & 0x8000)) { // TODO 0x4000 / 0x8000 for ground / water foot steps
-                                    game->playSound(fx, pos, Sound::Flags::PAN);
+                                    game->playSound(fx, pos, Sound::PAN);
                                 }
                             }
                         }
@@ -893,25 +969,39 @@ struct Controller {
     virtual void update() {
         updateAnimation(true);
         updateExplosion();
+        updateLights(true);
     }
 
     void updateLights(bool lerp = true) {
+        TR::Room::Light sunLight;
+
         if (getModel()) {
             const TR::Room &room = getRoom();
 
             vec3 center = getBoundingBox().center();
             float maxAtt = 0.0f;
+            /*
+            if (room.flags.sky) { // TODO trace rooms up for sun light, add direct light projection
+                sunLight.x      = int32(center.x);
+                sunLight.y      = int32(center.y) - 8192;
+                sunLight.z      = int32(center.z);
+                sunLight.color  = TR::Color32(255, 255, 255, 255);
+                sunLight.radius = 1000 * 1024;
+                targetLight     = &sunLight;
+            } else {
+            */
+            {
+                for (int i = 0; i < room.lightsCount; i++) {
+                    TR::Room::Light &light = room.lights[i];
+                    if ((light.color.r | light.color.g | light.color.b) == 0) continue;
 
-            for (int i = 0; i < room.lightsCount; i++) {
-                TR::Room::Light &light = room.lights[i];
-                if (light.intensity > 0x1FFF) continue;
+                    vec3 dir = vec3(float(light.x), float(light.y), float(light.z)) - center;
+                    float att = max(0.0f, 1.0f - dir.length2() / float(light.radius) / float(light.radius)) * ((light.color.r + light.color.g + light.color.b) / (3.0f * 255.0f));
 
-                vec3 dir = vec3(float(light.x), float(light.y), float(light.z)) - center;
-                float att = max(0.0f, 1.0f - dir.length2() / float(light.radius) / float(light.radius)) * (1.0f - intensityf(light.intensity));
-
-                if (att > maxAtt) {
-                    maxAtt = att;
-                    targetLight = &light;
+                    if (att > maxAtt) {
+                        maxAtt = att;
+                        targetLight = &light;
+                    }
                 }
             }
         } else 
@@ -924,7 +1014,7 @@ struct Controller {
         }
 
         vec3 tpos   = vec3(float(targetLight->x), float(targetLight->y), float(targetLight->z));
-        vec4 tcolor = vec4(vec3(1.0f - intensityf(targetLight->intensity)), float(targetLight->radius));
+        vec4 tcolor = vec4(vec3(targetLight->color.r, targetLight->color.g, targetLight->color.b) * (1.0f / 255.0f), float(targetLight->radius));
 
         if (lerp) {
             float t = Core::deltaTime * 2.0f;
@@ -937,17 +1027,15 @@ struct Controller {
     }
 
     mat4 getMatrix() {
+        if (level->isCutsceneLevel() && (getEntity().isActor() || getEntity().isLara())) 
+            return level->cutMatrix;
+
         mat4 matrix;
-
-        if (!getEntity().isActor()) {
-            matrix.identity();
-            matrix.translate(pos);
-            if (angle.y != 0.0f) matrix.rotateY(angle.y - (animation.flip ? PI * animation.delta : 0.0f));
-            if (angle.x != 0.0f) matrix.rotateX(angle.x);
-            if (angle.z != 0.0f) matrix.rotateZ(angle.z);
-        } else
-            matrix = level->cutMatrix;
-
+        matrix.identity();
+        matrix.translate(pos);
+        if (angle.y != 0.0f) matrix.rotateY(angle.y - (animation.flip ? PI * animation.delta : 0.0f));
+        if (angle.x != 0.0f) matrix.rotateX(angle.x);
+        if (angle.z != 0.0f) matrix.rotateZ(angle.z);
         return matrix;
     }
 
@@ -962,7 +1050,8 @@ struct Controller {
         explodeParts = new ExplodePart[model->mCount];
         explodeMask  = 0;
        
-        animation.getJoints(getMatrix(), -1, true, joints);
+        updateJoints();
+
         int roomIndex = getRoomIndex();
         for (int i = 0; i < model->mCount; i++) {
             if (!(mask & (1 << i)))
@@ -980,9 +1069,7 @@ struct Controller {
     }
 
     void renderShadow(MeshBuilder *mesh) {
-        const TR::Entity &entity = getEntity();
-
-        if (Core::pass != Core::passCompose || !entity.castShadow() || entity.isActor())
+        if (Core::pass != Core::passCompose || level->isCutsceneLevel())
             return;
 
         Box boxL = getBoundingBoxLocal();
@@ -1002,29 +1089,42 @@ struct Controller {
 
         mat4 m;
         m.identity();
-        m.dir    = vec4(dir * size.z, 0.0f);
-        m.up     = vec4(up, 0.0f);
-        m.right  = vec4(right * size.x, 0.0f);
-        m.offset = vec4(center.x, info.floor - 8.0f, center.z, 1.0f);
+        m.dir()    = vec4(dir * size.z, 0.0f);
+        m.up()     = vec4(up, 0.0f);
+        m.right()  = vec4(right * size.x, 0.0f);
+        m.offset() = vec4(center.x, info.floor - 8.0f, center.z, 1.0f);
+        Core::mModel = m;
 
         Basis b;
         b.identity();
 
         game->setShader(Core::pass, Shader::FLASH, false, false);
         Core::active.shader->setParam(uViewProj, Core::mViewProj * m);
-        Core::active.shader->setParam(uBasis, b);
+        Core::setBasis(&b, 1);
+
         float alpha = lerp(0.7f, 0.90f, clamp((info.floor - boxA.max.y) / 1024.0f, 0.0f, 1.0f) );
-        Core::active.shader->setParam(uMaterial, vec4(vec3(0.5f * (1.0f - alpha)), alpha));
+        float lum   = 0.5f * (1.0f - alpha);
+        Core::setMaterial(lum, lum, lum, alpha);
         Core::active.shader->setParam(uAmbient, vec3(0.0f));
 
         Core::setDepthWrite(false);
-        Core::setBlending(bmMultiply);
         mesh->renderShadowBlob();
-        Core::setBlending(bmNone);
         Core::setDepthWrite(true);
     }
 
-    virtual void render(Frustum *frustum, MeshBuilder *mesh, Shader::Type type, bool caustics) { // TODO: animation.calcJoints
+    void updateJoints() {
+        if (Core::stats.frame == jointsFrame)
+            return;
+        animation.getJoints(getMatrix(), -1, true, joints);
+        jointsFrame = Core::stats.frame;
+    }
+
+    Basis& getJoint(int index) {
+        updateJoints();
+        return joints[index];
+    }
+
+    virtual void render(Frustum *frustum, MeshBuilder *mesh, Shader::Type type, bool caustics) {
         mat4 matrix = getMatrix();
 
         Box box = animation.getBoundingBox(vec3(0, 0, 0), 0);
@@ -1036,8 +1136,9 @@ struct Controller {
 
         flags.rendered = true;
 
-        if (Core::stats.frame != frameIndex)
-            animation.getJoints(matrix, -1, true, joints);
+        updateJoints();
+
+        Core::mModel = getMatrix();
 
         if (layers) {
             uint32 mask = 0;
@@ -1049,7 +1150,7 @@ struct Controller {
                 mask |= layers[i].mask;
             // set meshes visibility
                 for (int j = 0; j < model->mCount; j++)
-                    joints[j].w = (vmask & (1 << j)) ? 1.0f : -1.0f; // AHAHA
+                    joints[j].w = (vmask & (1 << j)) ? 1.0f : -1.0f; // hide invisible parts
 
                 if (explodeMask) {
                     ASSERT(explodeParts);
@@ -1059,18 +1160,14 @@ struct Controller {
                             joints[i] = explodeParts[i].basis;
                 }
 
-            //    if (entity.type == TR::Entity::LARA && Core::eye != 0)
-            //        joints[14].w = -1.0f;
             // render
-                Core::active.shader->setParam(uBasis, joints[0], model->mCount);
-                mesh->renderModel(layers[i].model);
+                Core::setBasis(joints, model->mCount);
+                mesh->renderModel(layers[i].model, caustics);
             }
         } else {
-            Core::active.shader->setParam(uBasis, joints[0], model->mCount);
-            mesh->renderModel(getEntity().modelIndex - 1);
+            Core::setBasis(joints, model->mCount);
+            mesh->renderModel(getEntity().modelIndex - 1, caustics);
         }
-
-        frameIndex = Core::stats.frame;
     }
 };
 
